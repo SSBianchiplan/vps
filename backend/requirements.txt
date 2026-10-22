@@ -23,3 +23,4 @@ segno>=1.6               # QR puro-python p/ etiquetas do VPS (Gerador de Tags)
 # Opcional: sem isso, o iaMAC degrada para RAG extrativo (sem síntese).
 mlx; platform_machine == "arm64" and sys_platform == "darwin"
 mlx-lm; platform_machine == "arm64" and sys_platform == "darwin"
+certifi>=2026.10.19  # GHSA-6q48-6c7w-9gw2 (CAs emSign)
