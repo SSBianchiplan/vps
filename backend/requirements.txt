@@ -1,0 +1,25 @@
+# ─────────────────────────────────────────────────────────────
+# VisionDesk — dependências CORE (instalam em qualquer ambiente,
+# incluindo Apple Silicon / Python 3.12–3.14).
+# Com este conjunto o sistema roda end-to-end pelo caminho VLM (Claude).
+# ─────────────────────────────────────────────────────────────
+fastapi>=0.115
+uvicorn>=0.32
+websockets>=13          # implementação de WebSocket para o uvicorn (necessária p/ /ws/stream)
+pydantic>=2.9
+pydantic-settings>=2.6
+python-multipart>=0.0.12
+anthropic>=0.40
+pillow>=11.0
+httpx>=0.27
+segno>=1.6               # QR puro-python p/ etiquetas do VPS (Gerador de Tags)
+
+# Edge (OPCIONAL): instale separadamente quando quiser o caminho local
+# de detecção/OCR. Em Python 3.14 alguns wheels podem não existir ainda;
+# o backend degrada graciosamente e cai no VLM se faltarem.
+# Veja requirements-edge.txt.
+
+# iaMAC — IA própria local (LLM open-weight via MLX, Apple Silicon).
+# Opcional: sem isso, o iaMAC degrada para RAG extrativo (sem síntese).
+mlx; platform_machine == "arm64" and sys_platform == "darwin"
+mlx-lm; platform_machine == "arm64" and sys_platform == "darwin"

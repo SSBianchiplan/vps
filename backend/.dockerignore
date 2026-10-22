@@ -1,0 +1,10 @@
+# Contexto mínimo: a imagem só precisa de requirements.txt e app/.
+.venv/
+data/
+tests/
+.pytest_cache/
+**/__pycache__/
+*.pyc
+*.pt
+.env
+.env.*

@@ -1,0 +1,189 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─────────────────────────────────────────────────────────────
+   VisionDesk — Theme Engine (spec_aparencia.md)
+   Tokens em CSS variables; engine.ts sobrescreve no <html> via
+   style.setProperty + data-theme. As classes abaixo CONSOMEM as
+   vars, então toda a UI reage ao painel Aparência ao vivo.
+   ───────────────────────────────────────────────────────────── */
+:root {
+  --radius: 14px;
+
+  /* Tema ESCURO (padrão) — tokens nativos do VisionDesk */
+  --bg: #0b0f14;
+  --panel: rgba(255, 255, 255, 0.055);
+  --edge: #1e2733;
+  --surface: #1a2230;
+  --text: #e6edf3;
+  --muted: #8b97a7;
+  --accent: #19c3b2;
+  --accent-2: #3da9fc;
+  --ok: #2ecc71;
+  --nok: #ff5c5c;
+  --warn: #f5a623;
+  --on-accent: #0b0f14;
+
+  /* Canais RGB (p/ modificadores de opacidade do Tailwind, ex. bg-accent/20) */
+  --edge-rgb: 30 39 51;
+  --text-rgb: 230 237 243;
+  --muted-rgb: 139 151 167;
+  --accent-rgb: 25 195 178;   /* dinâmico: o engine sobrescreve conforme o acento */
+  --accent2-rgb: 61 169 252;
+  --ok-rgb: 46 204 113;
+  --nok-rgb: 255 92 92;
+  --warn-rgb: 245 166 35;
+
+  /* Glass / cards (defaults p/ antes do engine rodar) */
+  --primary: #19c3b2;
+  --card-bg: var(--panel);
+  --card-border: var(--edge);
+  --card-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --card-kpi-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
+  --card-blur: 24px;
+  --card-saturate: 160%;
+  --system-card-pad: 16px;
+  --system-card-gap: 14px;
+  --system-card-title: 15px;
+  --font-size: 14px;
+
+  /* Modal */
+  --modal-bg: rgba(12, 12, 16, 0.92);
+  --modal-border: rgba(255, 255, 255, 0.10);
+  --modal-overlay: rgba(0, 0, 0, 0.68);
+  --modal-shadow: 0 32px 80px rgba(0, 0, 0, 0.72);
+  --radius-modal: 20px;
+  --modal-blur: 48px;
+  --modal-saturate: 180%;
+
+  /* Nav */
+  --nav-bg: linear-gradient(170deg, #383d41 0%, #2d3336 100%);
+  --nav-width: 278px;
+
+  /* Tooltip */
+  --tip-bg: #0f172a;
+  --tip-border: #334155;
+  --tip-color: #e2e8f0;
+  --tip-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  --tip-radius: 10px;
+  --tip-blur: 0px;
+
+  /* Charts */
+  --chart-bg: rgba(15, 23, 42, 0.88);
+  --chart-grid: rgba(255, 255, 255, 0.07);
+  --chart-axis: rgba(148, 163, 184, 0.65);
+  --chart-c1: #3b82f6;
+  --chart-c2: #10b981;
+  --chart-c3: #f59e0b;
+  --chart-c4: #ef4444;
+  --chart-c5: #8b5cf6;
+  --chart-c6: #06b6d4;
+}
+
+[data-theme="light"] {
+  --bg: #eef2f6;
+  --panel: rgba(255, 255, 255, 0.65);
+  --edge: #e3e8ef;
+  --surface: #f1f5f9;
+  --text: #0b1220;
+  --muted: #5b6675;
+  --accent-2: #2563eb;
+  --ok: #16a34a;
+  --nok: #dc2626;
+  --warn: #d97706;
+  --on-accent: #ffffff;
+
+  --edge-rgb: 227 232 239;
+  --text-rgb: 11 18 32;
+  --muted-rgb: 91 102 117;
+  --accent2-rgb: 37 99 235;
+  --ok-rgb: 22 163 74;
+  --nok-rgb: 220 38 38;
+  --warn-rgb: 217 119 6;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--font-size, 14px);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  transition: background 180ms ease, color 180ms ease;
+}
+
+/* ── Superfícies de vidro: toda .bg-panel/.vd-surface lê as vars de card ── */
+.bg-panel,
+.vd-surface {
+  background: var(--card-bg);
+  border-color: var(--card-border);
+  box-shadow: var(--card-shadow);
+  backdrop-filter: blur(var(--card-blur, 24px)) saturate(var(--card-saturate, 160%));
+  -webkit-backdrop-filter: blur(var(--card-blur, 24px)) saturate(var(--card-saturate, 160%));
+}
+
+/* Modais — fundo/forma/blur do preset de modal */
+.vd-modal {
+  background: var(--modal-bg) !important;
+  border: 1px solid var(--modal-border);
+  box-shadow: var(--modal-shadow);
+  border-radius: var(--radius-modal, 20px);
+  backdrop-filter: blur(var(--modal-blur, 48px)) saturate(var(--modal-saturate, 180%));
+  -webkit-backdrop-filter: blur(var(--modal-blur, 48px)) saturate(var(--modal-saturate, 180%));
+}
+.vd-modal-overlay {
+  background: var(--modal-overlay);
+}
+
+/* Tooltip utilitário */
+.vd-tip {
+  background: var(--tip-bg);
+  border: 1px solid var(--tip-border);
+  color: var(--tip-color);
+  box-shadow: var(--tip-shadow);
+  border-radius: var(--tip-radius);
+  backdrop-filter: blur(var(--tip-blur, 0px));
+  -webkit-backdrop-filter: blur(var(--tip-blur, 0px));
+}
+
+/* Scrollbars discretas */
+.scroll-thin::-webkit-scrollbar { width: 8px; }
+.scroll-thin::-webkit-scrollbar-thumb { background: var(--edge); border-radius: 8px; }
+
+/* ── Hooks de data-attributes do theme engine ── */
+[data-motion="off"] *,
+[data-motion="off"] *::before,
+[data-motion="off"] *::after {
+  transition: none !important;
+  animation: none !important;
+}
+[data-motion="fast"] * { transition-duration: 60ms !important; }
+[data-motion="slow"] * { transition-duration: 500ms !important; }
+
+[data-high-contrast="true"] { filter: contrast(1.22) saturate(1.15); }
+
+/* Densidade de tabelas/listas */
+[data-table-density="compact"] td,
+[data-table-density="compact"] th { padding: 4px 8px; }
+[data-table-density="comfortable"] td,
+[data-table-density="comfortable"] th { padding: 12px 14px; }
+[data-density="compact"] { --radius: 10px; }
+
+/* Layout dos cards — padding dos painéis conforme CARD_LAYOUTS */
+[data-card-layout="otc"] .bg-panel { padding: var(--system-card-pad, 18px); }
+[data-card-layout="compact"] .bg-panel { padding: var(--system-card-pad, 12px); }
+[data-card-layout="executive"] .bg-panel { padding: var(--system-card-pad, 22px); }
+
+/* Estilos de botão (aplica a <button>, exceto os marcados .vd-keep) */
+[data-btn-style="pill"] button:not(.vd-keep) { border-radius: 999px !important; }
+[data-btn-style="outlined"] button:not(.vd-keep) { background: transparent !important; }
+[data-btn-style="solido"] button:not(.vd-keep) {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}

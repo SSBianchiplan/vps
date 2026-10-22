@@ -1,0 +1,17 @@
+# ─────────────────────────────────────────────────────────────
+# VisionDesk — dependências EDGE (opcionais).
+# Caminho de inferência local: detecção/contagem (YOLO), OCR e tracking.
+# Em Apple Silicon priorize CoreML/MPS. Em Python muito recente (3.14)
+# alguns destes pacotes ainda não têm wheels — use Python 3.12 para o edge.
+#
+#   pip install -r requirements.txt -r requirements-edge.txt
+# ─────────────────────────────────────────────────────────────
+numpy>=1.26
+opencv-python-headless>=4.10
+ultralytics>=8.3          # YOLO11 / RT-DETR + ByteTrack/BoT-SORT embutidos
+# OCR LER sem token no macOS — Apple Vision nativo (sem download de modelo):
+pyobjc-framework-Vision>=10.0 ; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10.0 ; sys_platform == "darwin"
+# paddleocr>=2.8           # OCR alternativo multiplataforma
+# onnxruntime>=1.19
+# coremltools>=8.0

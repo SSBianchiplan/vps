@@ -1,0 +1,34 @@
+# MediaMTX — fan-out de 1 decode RTSP p/ N viewers (WebRTC/HLS). #3
+# + Visão Aérea: ingest RTMP do DJI Fly (spec_Drono.md).
+# API em :9997, WebRTC (WHEP) em http://host:8889/<path>/whep, RTMP in em :1935
+api: yes
+apiAddress: :9997
+# Libera publish/read/api p/ qualquer origem (o backend consulta a API pelo gateway
+# do Docker, não 127.0.0.1). Em produção: restringir por IP/usuário e fechar a 9997.
+authInternalUsers:
+  - user: any
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+      - action: metrics
+webrtc: yes
+webrtcAddress: :8889
+# IPs que o MediaMTX anuncia nos candidatos ICE (precisa ser alcançável pelo viewer).
+webrtcAdditionalHosts: [127.0.0.1, 192.168.1.10]   # ajuste: IPs alcançáveis pelos viewers (LAN/VPN)
+hls: yes
+hlsAddress: :8888
+hlsVariant: lowLatency
+hlsAlwaysRemux: yes
+rtspAddress: :8554
+rtmp: yes
+rtmpAddress: :1935
+
+paths:
+  # Restream de uma câmera IP (descomente e ajuste IP/credenciais):
+  # cam_wbsj:
+  #   source: rtsp://USUARIO:SENHA@192.168.1.64:554/onvif1
+  #   sourceOnDemand: yes
+  # Publicação ad-hoc (ex.: ffmpeg push) é aceita em qualquer path por padrão.
+  all_others:

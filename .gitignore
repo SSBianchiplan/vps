@@ -1,0 +1,65 @@
+# Segredos — nunca versionar (só os *.example)
+.env
+.env.*
+!.env.example
+!.env.docker.example
+*.local
+
+# Dados, bancos, frames, gravações e backups
+data/
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+frames/
+recordings/
+*.bak
+*.bak*
+*-bak-*
+backups/
+
+# Pesos de modelos (baixe à parte — veja o README)
+*.pt
+*.onnx
+*.mlmodel
+*.mlpackage/
+*.safetensors
+models/weights/
+visiondesk-models/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+
+# Logs e temporários
+*.log
+*.tmp
+tmp/
+
+# Certificados de dev (HTTPS local) e chaves
+certs/
+*.pem
+*.key
+*.crt
+*.p12
+
+# SO / editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp

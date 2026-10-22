@@ -1,0 +1,1441 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>VisionDesk · VPS — a câmera vira um sensor de decisão</title>
+<meta name="description" content="VisionDesk + VPS, por GPlan: leitura, detecção, rastreio, contagem, descrição e análise sobre as câmeras que a planta já tem. A máquina propõe, o humano confirma." />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   TOKENS — identidade VisionDesk (ardósia + verde-água)
+   ============================================================ */
+:root{
+  --ink:#080B0C;
+  --ink-2:#0E1214;
+  --ink-3:#151A1C;
+  --slate:#373C40;
+  --bone:#F2F4F6;
+  --dim:rgba(242,244,246,.58);
+  --dimmer:rgba(242,244,246,.30);
+  --hair:rgba(242,244,246,.13);
+
+  --teal:#2EC2B3;
+  --mint:#7BE5CF;
+  --sky:#4FA8FF;
+  --amber:#FFC24B;
+  --ember:#FF5B2E;
+
+  --display:"Space Grotesk","Helvetica Neue",Arial,sans-serif;
+  --text:"IBM Plex Sans","Helvetica Neue",Arial,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+
+  --pad: clamp(18px, 4.4vw, 76px);
+  --rule: 1px solid var(--hair);
+  --ease: cubic-bezier(.22,.61,.24,1);
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{
+  background:var(--ink);
+  color:var(--bone);
+  font-family:var(--text);
+  font-size:clamp(15px,1.05vw,17px);
+  line-height:1.55;
+  /* `hidden` recorta MAS transforma o body em contêiner de rolagem, e dentro de
+     um contêiner desses o position:sticky das seções fixadas para de colar.
+     `clip` recorta sem criar contêiner — é o que mantém o sticky do celular de
+     pé. A primeira linha fica de reserva para navegador antigo sem `clip`. */
+  overflow-x:hidden;
+  overflow-x:clip;
+  -webkit-font-smoothing:antialiased;
+}
+body.is-locked{overflow:hidden}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--teal);outline-offset:3px}
+canvas{display:block}
+
+/* ============================================================
+   ROLAGEM SUAVE
+   ============================================================ */
+#viewport{position:fixed;inset:0 0 auto 0;width:100%;will-change:transform;z-index:2}
+html.no-smooth #viewport{position:relative;transform:none!important}
+html.no-smooth body{height:auto!important}
+
+/* ============================================================
+   FUNDO: CAMPO WEBGL + GRÃO
+   ============================================================ */
+#field{position:fixed;inset:0;z-index:0;opacity:0;transition:opacity 1.4s var(--ease)}
+#field.ready{opacity:1}
+#backdrop-fallback{position:fixed;inset:0;z-index:0;
+  background:
+    radial-gradient(60vw 60vw at 18% 14%, rgba(46,194,179,.22), transparent 62%),
+    radial-gradient(52vw 52vw at 84% 28%, rgba(79,168,255,.16), transparent 62%),
+    radial-gradient(70vw 70vw at 50% 100%, rgba(55,60,64,.55), transparent 60%),
+    var(--ink);
+}
+#grain{position:fixed;inset:-50%;z-index:1;pointer-events:none;opacity:.05;mix-blend-mode:screen;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>");
+  animation:grain 7s steps(6) infinite}
+@keyframes grain{
+  0%{transform:translate(0,0)}20%{transform:translate(-6%,4%)}40%{transform:translate(4%,-6%)}
+  60%{transform:translate(-4%,-3%)}80%{transform:translate(6%,5%)}100%{transform:translate(0,0)}
+}
+
+/* ============================================================
+   CURSOR
+   ============================================================ */
+#cursor{position:fixed;top:0;left:0;width:12px;height:12px;
+  background:var(--bone);mix-blend-mode:difference;pointer-events:none;z-index:90;
+  transform:translate(-50%,-50%);transition:width .3s var(--ease),height .3s var(--ease)}
+#cursor.grow{width:52px;height:52px}
+@media (hover:none){#cursor{display:none}}
+
+/* ============================================================
+   ABERTURA
+   ============================================================ */
+#loader{position:fixed;inset:0;z-index:100;background:var(--ink);display:grid;
+  grid-template-rows:1fr auto;padding:var(--pad);transition:opacity .8s var(--ease)}
+#loader .word{align-self:end;font-family:var(--display);font-weight:300;
+  font-size:clamp(40px,10vw,178px);line-height:.9;letter-spacing:-.035em}
+#loader .word span{display:inline-block;overflow:hidden;vertical-align:bottom}
+#loader .word span i{display:inline-block;font-style:normal;transform:translateY(110%)}
+#loader .bar{height:2px;background:var(--hair);margin-top:26px;position:relative;overflow:hidden}
+#loader .bar b{position:absolute;inset:0 100% 0 0;background:var(--teal);transition:right .2s linear}
+#loader .meta{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11.5px;
+  color:var(--dim);margin-top:12px;letter-spacing:.04em}
+#loader.done{opacity:0;pointer-events:none}
+
+/* ============================================================
+   NAVEGAÇÃO
+   ============================================================ */
+header.nav{position:fixed;top:0;left:0;right:0;z-index:60;display:flex;align-items:center;
+  justify-content:space-between;padding:18px var(--pad);
+  mix-blend-mode:difference;transition:transform .5s var(--ease)}
+header.nav.hide{transform:translateY(-120%)}
+.mark{display:flex;align-items:center;gap:10px;font-family:var(--display);font-size:16px;
+  font-weight:500;letter-spacing:-.01em}
+.mark svg{width:22px;height:22px}
+.mark b{font-weight:500}
+.mark i{font-style:normal;font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.08em}
+.nav ul{display:flex;gap:26px;list-style:none;font-size:14px}
+.nav ul a{position:relative;padding-bottom:2px}
+.nav ul a::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:currentColor;
+  transform:scaleX(0);transform-origin:right;transition:transform .45s var(--ease)}
+.nav ul a:hover::after{transform:scaleX(1);transform-origin:left}
+.nav .acoes{display:flex;align-items:center;gap:10px}
+.nav .get,.nav .enter{border:1px solid currentColor;padding:9px 18px;font-size:13.5px;white-space:nowrap}
+.nav .enter{display:flex;align-items:center;gap:8px}
+.nav .enter svg{width:13px;height:13px;flex:none}
+@media(max-width:960px){.nav ul{display:none}}
+/* Abaixo de 560px cabem UM botão e a marca, não dois: "Agendar" sai do topo —
+   a seção de contato repete a chamada —, "Entrar" fica, que é o caminho de
+   quem já é cliente e abre o site pelo celular. */
+@media(max-width:560px){
+  .nav .get{display:none}
+  header.nav{padding:14px var(--pad)}
+  .mark i{display:none}
+}
+
+/* ============================================================
+   PRIMITIVAS
+   ============================================================ */
+section{position:relative;z-index:2}
+.wrap{padding-inline:var(--pad)}
+.eyebrow{font-family:var(--mono);font-size:11.5px;color:var(--dim);display:flex;align-items:center;
+  gap:9px;letter-spacing:.08em}
+.eyebrow::before{content:"";width:26px;height:1px;background:currentColor;opacity:.5}
+h2.big{font-family:var(--display);font-weight:300;letter-spacing:-.035em;line-height:.96;
+  font-size:clamp(32px,5.8vw,84px)}
+.lede{font-size:clamp(16px,1.4vw,20px);line-height:1.5;max-width:36ch;color:var(--dim)}
+.mono{font-family:var(--mono)}
+
+.rv{opacity:0;transform:translateY(22px);transition:opacity .9s var(--ease),transform .9s var(--ease)}
+.rv.in{opacity:1;transform:none}
+.split i{display:inline-block;font-style:normal;transform:translateY(105%);opacity:0;
+  transition:transform .9s var(--ease),opacity .6s linear}
+.split .l{display:inline-block;overflow:hidden;vertical-align:bottom}
+.split.in i{transform:none;opacity:1}
+
+/* ============================================================
+   ABERTURA DA PÁGINA
+   ============================================================ */
+#inicio{min-height:100svh;display:flex;flex-direction:column;justify-content:flex-end;
+  padding:0 var(--pad) clamp(26px,4vw,52px)}
+#inicio .kicker{font-family:var(--mono);font-size:12.5px;color:var(--dim);margin-bottom:auto;
+  padding-top:33vh;letter-spacing:.03em}
+#inicio .kicker b{color:var(--teal);font-weight:400}
+#inicio h1{font-family:var(--display);font-weight:300;font-size:clamp(44px,10.4vw,182px);
+  line-height:.88;letter-spacing:-.045em;max-width:15ch}
+#inicio h1 em{font-style:normal;color:var(--teal)}
+.hero-foot{display:flex;gap:clamp(20px,5vw,72px);align-items:flex-end;justify-content:space-between;
+  margin-top:clamp(26px,4vw,54px);flex-wrap:wrap}
+.hero-foot p{max-width:44ch;color:var(--dim);font-size:15.5px}
+.stores{display:flex;gap:10px;flex-wrap:wrap}
+.pill{border:1px solid var(--hair);padding:12px 22px;font-size:14px;
+  background:rgba(242,244,246,.03);backdrop-filter:blur(6px);
+  transition:background .4s var(--ease),color .4s var(--ease),border-color .4s var(--ease)}
+.pill:hover{background:var(--bone);color:var(--ink);border-color:var(--bone)}
+.pill.solid{background:var(--teal);border-color:var(--teal);color:#05100E}
+.pill.solid:hover{background:var(--mint);border-color:var(--mint)}
+.scrollcue{position:absolute;right:var(--pad);bottom:clamp(26px,4vw,52px);font-family:var(--mono);
+  font-size:11px;color:var(--dim);writing-mode:vertical-rl;letter-spacing:.1em}
+/* No celular os botões da abertura empilham e chegam na borda direita, onde
+   esta dica vertical mora: as duas coisas se sobrepõem. E a dica não faz falta
+   — no toque, rolar é o gesto óbvio. */
+@media(max-width:560px){.scrollcue{display:none}}
+
+/* ============================================================
+   FAIXA DE PERGUNTAS
+   ============================================================ */
+.marquee{border-top:var(--rule);border-bottom:var(--rule);padding:20px 0;overflow:hidden;
+  background:rgba(8,11,12,.55);backdrop-filter:blur(10px)}
+.marquee .row{display:flex;gap:52px;white-space:nowrap;will-change:transform}
+.marquee span{font-family:var(--display);font-size:clamp(20px,3vw,40px);font-weight:300;
+  letter-spacing:-.025em;display:flex;align-items:center;gap:52px}
+.marquee span::after{content:"";width:7px;height:7px;background:var(--teal)}
+
+/* ============================================================
+   MODOS
+   ============================================================ */
+#modos{padding:clamp(90px,15vw,210px) var(--pad)}
+#modos p.split{font-family:var(--display);font-weight:300;letter-spacing:-.03em;line-height:1.08;
+  font-size:clamp(27px,4.3vw,62px);max-width:20ch}
+#modos .dim{color:var(--dimmer)}
+#modos .foot{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:34px 40px;
+  margin-top:clamp(40px,6vw,88px);border-top:var(--rule);padding-top:30px}
+#modos .foot h4{font-family:var(--mono);font-size:13px;letter-spacing:.1em;margin-bottom:8px;color:var(--teal)}
+#modos .foot p{font-size:14.5px;color:var(--dim);line-height:1.5;max-width:30ch}
+@media(max-width:900px){#modos .foot{grid-template-columns:1fr 1fr}}
+@media(max-width:560px){#modos .foot{grid-template-columns:1fr}}
+
+/* ============================================================
+   COCKPIT (fixado, dirigido pela rolagem)
+   ============================================================ */
+#cockpit{height:420vh;position:relative}
+#cockpit .pin{position:absolute;top:0;left:0;width:100%;height:100svh;display:grid;
+  grid-template-columns:1fr minmax(260px,330px) 1fr;align-items:center;gap:clamp(16px,4vw,60px);
+  padding:0 var(--pad)}
+.pv-col{max-width:34ch}
+.pv-col.right{justify-self:end;text-align:right}
+.pv-item{position:absolute;opacity:0;transform:translateY(26px);pointer-events:none;
+  transition:opacity .6s var(--ease),transform .6s var(--ease);max-width:34ch}
+.pv-item.on{opacity:1;transform:none;position:relative}
+.pv-item h3{font-family:var(--display);font-weight:300;font-size:clamp(26px,3.6vw,50px);
+  letter-spacing:-.035em;line-height:1.04}
+.pv-item p{color:var(--dim);margin-top:14px;font-size:15.5px}
+.pv-item .tag{font-family:var(--mono);font-size:11.5px;color:var(--teal);margin-bottom:12px;letter-spacing:.1em}
+
+.phone{position:relative;aspect-ratio:9/19.2;width:100%;border-radius:38px;padding:9px;
+  background:linear-gradient(160deg,#2b2f31,#0b0e0f);
+  box-shadow:0 60px 120px rgba(0,0,0,.6),0 0 0 1px rgba(242,244,246,.09)}
+.screen{position:absolute;inset:9px;border-radius:30px;overflow:hidden;background:#05090A}
+.scr{position:absolute;inset:0;opacity:0;transform:scale(1.04);
+  transition:opacity .7s var(--ease),transform .9s var(--ease);
+  display:flex;flex-direction:column;justify-content:space-between;padding:26px 20px}
+.scr.on{opacity:1;transform:none}
+.scr .top{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;color:rgba(255,255,255,.72)}
+.scr .title{font-family:var(--display);font-weight:400;font-size:24px;line-height:1.08;letter-spacing:-.025em}
+.scr .sub{font-family:var(--mono);font-size:11px;color:rgba(255,255,255,.7);margin-top:8px;line-height:1.5}
+.scr .chip{display:inline-block;border:1px solid rgba(255,255,255,.4);padding:7px 13px;font-size:11px;margin-top:14px}
+.scr-1{background:radial-gradient(120% 90% at 20% 10%,#2EC2B3,#12564F 55%,#04100E)}
+.scr-2{background:radial-gradient(120% 90% at 80% 15%,#4FA8FF,#123A7A 55%,#05101d)}
+.scr-3{background:radial-gradient(120% 90% at 30% 85%,#7BE5CF,#1d5f5a 55%,#04100F)}
+.scr-4{background:radial-gradient(120% 90% at 65% 20%,#FFC24B,#8a4a13 55%,#170d05)}
+.scr .art{position:absolute;inset:0;opacity:.45;mix-blend-mode:soft-light}
+.progress-dots{display:flex;gap:6px;justify-content:center;margin-top:18px}
+.progress-dots i{width:16px;height:2px;background:var(--dimmer);transition:background .4s}
+.progress-dots i.on{background:var(--teal)}
+@media(max-width:900px){
+  #cockpit{height:360vh}
+  #cockpit .pin{grid-template-columns:1fr;justify-items:center;gap:20px;align-content:center}
+  /* Ver o bloco PRENDER NO CELULAR, no fim da folha. */
+  .pv-col.right{justify-self:center;text-align:center}
+  .pv-col{max-width:32ch;text-align:center}
+  .phone{width:min(58vw,236px)}
+  .pv-item p{display:none}
+}
+
+/* ============================================================
+   PERSPECTIVAS (faixa horizontal fixada)
+   ============================================================ */
+#perspectivas{height:340vh;position:relative}
+#perspectivas .pin{position:absolute;top:0;left:0;width:100%;height:100svh;overflow:hidden;display:flex;
+  flex-direction:column;justify-content:center}
+.jrn-head{display:flex;justify-content:space-between;align-items:flex-end;padding:0 var(--pad) 26px;gap:20px}
+.track{display:flex;gap:clamp(14px,2vw,24px);padding-inline:var(--pad);will-change:transform}
+.card{position:relative;flex:0 0 clamp(230px,25vw,360px);aspect-ratio:3/4.1;overflow:hidden;
+  display:flex;flex-direction:column;justify-content:flex-end;padding:22px;isolation:isolate;
+  border:1px solid rgba(242,244,246,.10)}
+.card .veil{position:absolute;inset:0;z-index:-1;transition:transform 1.1s var(--ease)}
+.card:hover .veil{transform:scale(1.05)}
+.card::after{content:"";position:absolute;inset:0;z-index:-1;
+  background:linear-gradient(to top,rgba(4,8,8,.9),rgba(4,8,8,.05) 62%)}
+.card h3{font-family:var(--display);font-weight:400;font-size:clamp(20px,2vw,29px);letter-spacing:-.02em;line-height:1.05}
+.card .meta{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;
+  color:var(--dim);margin-top:10px;letter-spacing:.04em}
+.card .desc{font-size:13.5px;color:rgba(242,244,246,.72);margin-top:10px;max-width:30ch}
+.card .num{position:absolute;top:18px;left:22px;font-family:var(--mono);font-size:11px;color:rgba(242,244,246,.75)}
+@media(max-width:700px){
+  #perspectivas{height:300vh}
+  .card{flex-basis:74vw}
+  /* Em duas colunas a 390px o título cai numa palavra por linha e a faixa de
+     cartões perde metade da altura para o cabeçalho. Empilhado, o título
+     respira e sobra tela para o que interessa, que são os cartões. */
+  .jrn-head{flex-direction:column;align-items:flex-start;gap:10px;padding-bottom:18px}
+  .jrn-head p{max-width:none}
+}
+
+/* ============================================================
+   O FIO DA DECISÃO
+   ============================================================ */
+#decisao{padding:clamp(90px,14vw,180px) var(--pad)}
+.walk-grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:clamp(24px,5vw,72px);
+  align-items:center;margin-top:clamp(30px,5vw,60px)}
+.map{position:relative;border:var(--rule);overflow:hidden;background:#0A0F10;aspect-ratio:4/3.1}
+.map svg{width:100%;height:100%;display:block}
+.stop{cursor:pointer}
+.stop circle.hit{fill:transparent}
+.stop .dot{fill:var(--bone);transition:r .35s var(--ease)}
+.stop.active .dot{fill:var(--teal);r:7}
+.stop .ring{fill:none;stroke:var(--teal);opacity:0;transform-origin:center}
+.stop.active .ring{opacity:1;animation:ping 2.4s var(--ease) infinite}
+@keyframes ping{0%{transform:scale(.5);opacity:.9}100%{transform:scale(2.6);opacity:0}}
+.stop text{font-family:var(--mono);font-size:11px;fill:var(--dim);letter-spacing:.04em}
+.stop.active text{fill:var(--bone)}
+.walk-panel h3{font-family:var(--display);font-weight:300;font-size:clamp(25px,3.2vw,42px);
+  letter-spacing:-.035em;line-height:1.06;margin:10px 0 14px}
+.walk-panel p{color:var(--dim);max-width:44ch}
+.walk-nav{display:flex;gap:8px;margin-top:26px;flex-wrap:wrap}
+.walk-nav button{border:1px solid var(--hair);padding:9px 15px;font-family:var(--mono);font-size:12px;
+  color:var(--dim);transition:.35s var(--ease)}
+.walk-nav button[aria-pressed="true"]{background:var(--teal);color:#05100E;border-color:var(--teal)}
+.audio-line{display:flex;align-items:center;gap:12px;margin-top:24px;font-family:var(--mono);
+  font-size:12px;color:var(--dim);letter-spacing:.03em}
+.audio-line .wavebar{display:flex;gap:3px;align-items:flex-end;height:16px}
+.audio-line .wavebar i{width:2px;background:var(--teal);height:30%;animation:wv 1.1s ease-in-out infinite}
+.audio-line .wavebar i:nth-child(2){animation-delay:.15s}
+.audio-line .wavebar i:nth-child(3){animation-delay:.3s}
+.audio-line .wavebar i:nth-child(4){animation-delay:.45s}
+@keyframes wv{0%,100%{height:22%}50%{height:100%}}
+@media(max-width:900px){.walk-grid{grid-template-columns:1fr}}
+
+/* ============================================================
+   NÚMEROS
+   ============================================================ */
+#numeros{border-top:var(--rule);border-bottom:var(--rule);padding:clamp(50px,7vw,90px) var(--pad);
+  display:grid;grid-template-columns:repeat(4,1fr);gap:clamp(16px,3vw,44px)}
+#numeros .s h3{font-family:var(--display);font-weight:300;font-size:clamp(36px,5.6vw,88px);
+  letter-spacing:-.045em;line-height:1}
+#numeros .s h3 u{text-decoration:none;font-size:.42em;color:var(--dim);margin-left:.18em;font-family:var(--mono)}
+#numeros .s p{font-size:13.5px;color:var(--dim);margin-top:8px;max-width:22ch}
+@media(max-width:820px){#numeros{grid-template-columns:1fr 1fr;row-gap:38px}}
+
+/* ============================================================
+   CASOS (baralho)
+   ============================================================ */
+#casos{padding:clamp(90px,14vw,180px) var(--pad);display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(300px,42%);gap:clamp(30px,5vw,80px);align-items:center}
+.deck{position:relative;aspect-ratio:5/6;touch-action:pan-y}
+.deck article{position:absolute;inset:0;padding:clamp(20px,2.4vw,34px);
+  display:flex;flex-direction:column;justify-content:space-between;color:#05100E;cursor:grab;
+  box-shadow:0 30px 70px rgba(0,0,0,.5);will-change:transform;user-select:none}
+.deck article:active{cursor:grabbing}
+.deck article h3{font-family:var(--display);font-weight:400;font-size:clamp(23px,2.5vw,37px);
+  letter-spacing:-.03em;line-height:1.06}
+.deck article .cat{font-family:var(--mono);font-size:11.5px;opacity:.7;letter-spacing:.1em}
+.deck article .read{font-size:13px;border-bottom:1px solid rgba(5,16,14,.4);align-self:flex-start;padding-bottom:2px}
+.deck-hint{font-family:var(--mono);font-size:11.5px;color:var(--dimmer);margin-top:18px;letter-spacing:.04em}
+@media(max-width:900px){#casos{grid-template-columns:1fr}.deck{aspect-ratio:5/5.2}}
+
+/* leitor */
+#reader{position:fixed;inset:0;z-index:80;background:rgba(5,8,9,.74);backdrop-filter:blur(14px);
+  display:flex;justify-content:flex-end;opacity:0;pointer-events:none;transition:opacity .5s var(--ease)}
+#reader.open{opacity:1;pointer-events:auto}
+#reader .sheet{background:var(--ink-2);width:min(640px,100%);height:100%;overflow-y:auto;
+  padding:clamp(22px,4vw,60px);transform:translateX(40px);transition:transform .6s var(--ease);border-left:var(--rule)}
+#reader.open .sheet{transform:none}
+#reader h2{font-family:var(--display);font-weight:300;font-size:clamp(27px,3.4vw,44px);
+  letter-spacing:-.035em;line-height:1.06;margin:14px 0 18px}
+#reader p{color:var(--dim);margin-bottom:16px;max-width:62ch}
+#reader .close{position:sticky;top:0;float:right;font-family:var(--mono);font-size:12px;color:var(--dim)}
+
+/* ============================================================
+   AO VIVO
+   ============================================================ */
+#aovivo{padding:clamp(80px,12vw,160px) var(--pad);border-top:var(--rule)}
+.sound-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:clamp(26px,5vw,70px);
+  align-items:center;margin-top:clamp(28px,4vw,56px)}
+.visual{position:relative;overflow:hidden;background:#050A0B;border:var(--rule);aspect-ratio:16/10}
+.visual canvas{width:100%;height:100%}
+.visual .play{position:absolute;inset:auto auto 16px 16px;display:flex;align-items:center;gap:10px;
+  border:1px solid var(--hair);padding:10px 18px;font-size:13.5px;
+  background:rgba(8,11,12,.6);backdrop-filter:blur(8px);transition:.35s var(--ease)}
+.visual .play:hover{background:var(--bone);color:var(--ink)}
+.visual .badge{position:absolute;top:14px;right:16px;font-family:var(--mono);font-size:11px;
+  color:var(--dim);letter-spacing:.06em;text-align:right;line-height:1.7}
+.sslist{list-style:none;border-top:var(--rule)}
+.sslist li{border-bottom:var(--rule)}
+.sslist button{width:100%;display:flex;justify-content:space-between;align-items:baseline;gap:16px;
+  padding:16px 0;text-align:left;transition:padding .4s var(--ease),color .4s var(--ease)}
+.sslist button:hover,.sslist button[aria-pressed="true"]{padding-left:12px}
+.sslist button[aria-pressed="true"] .nm{color:var(--teal)}
+.sslist .nm{font-family:var(--display);font-weight:400;font-size:clamp(19px,2.1vw,28px);letter-spacing:-.02em}
+.sslist .dur{font-size:13px;color:var(--dim);max-width:24ch;text-align:right}
+@media(max-width:900px){.sound-grid{grid-template-columns:1fr}.sslist .dur{display:none}}
+
+/* ============================================================
+   AJUDA
+   ============================================================ */
+#ajuda{padding:clamp(80px,12vw,160px) var(--pad);display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.4fr);
+  gap:clamp(26px,5vw,70px);align-items:start}
+.acc{border-top:var(--rule)}
+.acc details{border-bottom:var(--rule)}
+.acc summary{list-style:none;cursor:pointer;padding:22px 0;display:flex;justify-content:space-between;
+  gap:20px;font-size:clamp(16px,1.5vw,20px)}
+.acc summary::-webkit-details-marker{display:none}
+.acc summary .ic{position:relative;width:14px;height:14px;flex:0 0 14px;margin-top:8px}
+.acc summary .ic::before,.acc summary .ic::after{content:"";position:absolute;inset:50% 0 auto 0;height:1px;background:var(--bone)}
+.acc summary .ic::after{transform:rotate(90deg);transition:transform .45s var(--ease)}
+.acc details[open] summary .ic::after{transform:rotate(0)}
+.acc .ans{overflow:hidden;color:var(--dim);max-width:60ch;padding-bottom:22px;font-size:15.5px}
+@media(max-width:900px){#ajuda{grid-template-columns:1fr}}
+
+/* ============================================================
+   CHAMADA + RODAPÉ
+   ============================================================ */
+#contato{padding:clamp(90px,15vw,200px) var(--pad) clamp(60px,8vw,110px);text-align:center;position:relative}
+#contato h2{font-family:var(--display);font-weight:300;font-size:clamp(36px,9vw,152px);
+  letter-spacing:-.045em;line-height:.9}
+#contato h2 em{font-style:normal;color:var(--teal)}
+#contato .lede{margin:clamp(20px,3vw,32px) auto 0;text-align:center;max-width:52ch}
+#contato .stores{justify-content:center;margin-top:clamp(24px,4vw,44px)}
+footer{padding:0 var(--pad) 26px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;
+  border-top:var(--rule);padding-top:26px;font-family:var(--mono);font-size:12px;color:var(--dim);
+  letter-spacing:.03em;margin-top:clamp(60px,9vw,120px);text-align:left}
+footer nav{display:flex;gap:22px;flex-wrap:wrap}
+
+/* ============================================================
+   PRENDER NO CELULAR — pelo compositor, não pelo laço de quadros
+
+   As duas seções fixadas (cockpit e perspectivas) são presas no desktop por
+   um translateY que o JS reescreve a cada quadro. No celular isso não sobrevive
+   ao gesto: durante a rolagem por inércia o navegador segura o
+   requestAnimationFrame, o translate para de ser atualizado e a seção presa
+   simplesmente não acompanha o dedo — a página "rola sem animação nenhuma".
+
+   `position:sticky` é a mesma prisão feita pelo compositor: continua colada
+   durante a inércia, sem depender de JS. O JS detecta o modo pelo
+   getComputedStyle e para de escrever o transform (ver PRENDER, no script) —
+   assim a folha de estilo é a única fonte da verdade sobre qual modo vale.
+
+   O limite é 820px de propósito: é o MESMO do rolador suave
+   (`smooth: innerWidth>820`). Acima dele o #viewport é um elemento fixo e
+   transformado, e sticky dentro de um transform cola no elemento errado — os
+   dois modos não podem se sobrepor nem por um pixel. */
+@media(max-width:820px){
+  #cockpit .pin,#perspectivas .pin{position:sticky;left:auto;width:auto;
+    transform:none!important;height:100svh}
+}
+
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.001ms!important;transition-duration:.001ms!important}
+  .rv,.split i{opacity:1!important;transform:none!important}
+}
+</style>
+</head>
+<body>
+
+<!-- FUNDO -->
+<div id="backdrop-fallback"></div>
+<canvas id="field"></canvas>
+<div id="grain"></div>
+<div id="cursor"></div>
+
+<!-- ABERTURA -->
+<div id="loader">
+  <h1 class="word" aria-label="VisionDesk VPS">
+    <span><i>A</i></span> <span><i>máquina</i></span> <span><i>propõe.</i></span>
+  </h1>
+  <div>
+    <div class="bar"><b></b></div>
+    <div class="meta"><span>VisionDesk · VPS</span><span class="pct">0</span></div>
+  </div>
+</div>
+
+<!-- NAVEGAÇÃO -->
+<header class="nav">
+  <a class="mark" href="#inicio">
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="2.2" y="4.6" width="19.6" height="14.8" stroke="currentColor" stroke-width="1.2"/>
+      <circle cx="12" cy="12" r="4.4" stroke="currentColor" stroke-width="1.2"/>
+      <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+    </svg>
+    <b>VisionDesk&nbsp;VPS</b><i>por GPlan</i>
+  </a>
+  <ul>
+    <li><a href="#modos">Modos</a></li>
+    <li><a href="#cockpit">Cockpit</a></li>
+    <li><a href="#perspectivas">Perspectivas</a></li>
+    <li><a href="#decisao">A decisão</a></li>
+    <li><a href="#aovivo">Ao vivo</a></li>
+    <li><a href="#ajuda">Ajuda</a></li>
+  </ul>
+  <div class="acoes">
+    <a class="get" href="#contato">Agendar demonstração</a>
+    <a class="enter" href="/app">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M10 4H5.5A1.5 1.5 0 0 0 4 5.5v13A1.5 1.5 0 0 0 5.5 20H10" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M15 8l4 4-4 4M19 12H9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>Entrar
+    </a>
+  </div>
+</header>
+
+<div id="viewport">
+
+  <!-- ABERTURA -->
+  <section id="inicio">
+    <p class="kicker"><b>A máquina lê, detecta e propõe.</b> O humano confirma.</p>
+    <h1 class="split">A câmera vira um <em>sensor de decisão</em>.</h1>
+    <div class="hero-foot">
+      <p class="rv">VisionDesk e VPS transformam as câmeras que a planta já tem em leitura de lote,
+        detecção, rastreio, contagem e inspeção. Cada evento vira registro encadeado, e nada sai do
+        cockpit para o processo sem alguém confirmar.</p>
+      <div class="stores rv">
+        <a class="pill solid" href="#contato">Agendar demonstração</a>
+        <a class="pill" href="/app">Entrar no sistema</a>
+        <a class="pill" href="#decisao">Ver como a decisão anda</a>
+      </div>
+    </div>
+    <span class="scrollcue">role para o chão de fábrica</span>
+  </section>
+
+  <!-- PERGUNTAS -->
+  <div class="marquee" aria-hidden="true">
+    <div class="row" id="row1">
+      <span>O lote impresso está legível?</span><span>Quantas peças passaram no turno?</span>
+      <span>Alguém entrou na doca sem EPI?</span><span>Esse rótulo é da ordem certa?</span>
+      <span>Onde esse pallet parou?</span><span>A peça saiu OK ou NOK?</span>
+    </div>
+  </div>
+
+  <!-- MODOS -->
+  <section id="modos" class="wrap">
+    <p class="split">Seis modos de visão. O operador troca de modo <span class="dim">sem retreinar modelo</span>.</p>
+    <div class="foot">
+      <div class="rv"><h4>LER</h4><p>OCR de lote, validade, número de série e etiqueta, comparado com a ordem aberta.</p></div>
+      <div class="rv"><h4>DETECTAR</h4><p>Presença, ausência e posição: EPI, peça faltando, área ocupada, porta aberta.</p></div>
+      <div class="rv"><h4>RASTREAR</h4><p>O mesmo objeto seguido entre quadros e entre câmeras, com identidade estável.</p></div>
+      <div class="rv"><h4>CONTAR</h4><p>Passagem por linha virtual, com série temporal que fecha contra o apontamento.</p></div>
+      <div class="rv"><h4>DESCREVER</h4><p>Quadros amostrados vão a um modelo de linguagem visual quando a cena é aberta demais para uma regra.</p></div>
+      <div class="rv"><h4>ANALISAR</h4><p>Veredito OK, NOK ou pendente com justificativa obrigatória em cada recusa.</p></div>
+    </div>
+  </section>
+
+  <!-- COCKPIT -->
+  <section id="cockpit">
+    <div class="pin">
+      <div class="pv-col left" id="pvLeft"></div>
+      <div>
+        <div class="phone">
+          <div class="screen">
+            <div class="scr scr-1 on">
+              <div class="top">LER · CÂMERA BICO-03</div>
+              <canvas class="art" data-art="rings"></canvas>
+              <div>
+                <div class="title">Lote L-2418<br>lido na saída<br>da impressora</div>
+                <div class="sub">confere com a OP 90412 · 42 ms na borda</div>
+                <span class="chip">Confirmar leitura</span>
+              </div>
+            </div>
+            <div class="scr scr-2">
+              <div class="top">DETECTAR · DOCA 02</div>
+              <canvas class="art" data-art="waves"></canvas>
+              <div>
+                <div class="title">Pessoa sem<br>capacete na<br>área de manobra</div>
+                <div class="sub">confiança 0,91 · alarme ISA-18.2 não reconhecido</div>
+                <span class="chip">Reconhecer alarme</span>
+              </div>
+            </div>
+            <div class="scr scr-3">
+              <div class="top">CONTAR · PRENSA 04</div>
+              <canvas class="art" data-art="grid"></canvas>
+              <div>
+                <div class="title">1.284 peças<br>no turno B</div>
+                <div class="sub">linha virtual na saída · desvio de 6 peças contra o apontamento</div>
+                <span class="chip">Abrir a série</span>
+              </div>
+            </div>
+            <div class="scr scr-4">
+              <div class="top">ANALISAR · INSPEÇÃO 01</div>
+              <canvas class="art" data-art="rings"></canvas>
+              <div>
+                <div class="title">Veredito NOK<br>na peça 4477</div>
+                <div class="sub">na fila de confirmação há 12 s · recusa exige justificativa</div>
+                <span class="chip">Confirmar ou recusar</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="progress-dots" id="pvDots"><i class="on"></i><i></i><i></i><i></i></div>
+      </div>
+      <div class="pv-col right" id="pvRight"></div>
+    </div>
+  </section>
+
+  <!-- PERSPECTIVAS -->
+  <section id="perspectivas">
+    <div class="pin">
+      <div class="jrn-head wrap">
+        <div>
+          <p class="eyebrow">VPS//ORBIT</p>
+          <h2 class="big" style="margin-top:14px">Seis vistas<br>do mesmo dado</h2>
+        </div>
+        <p class="lede">O cockpit não troca de tela, troca de ponto de vista. A malha de sítios, o piso da
+          planta, o volume da câmera, o caminho da inferência, a pilha do modelo e a linha do tempo dos eventos.</p>
+      </div>
+      <div class="track" id="track"></div>
+    </div>
+  </section>
+
+  <!-- O FIO DA DECISÃO -->
+  <section id="decisao">
+    <p class="eyebrow">O caminho de um evento</p>
+    <h2 class="big" style="margin-top:16px">Da câmera<br>até a assinatura</h2>
+    <div class="walk-grid">
+      <div class="map">
+        <svg viewBox="0 0 800 620" id="mapsvg" role="img" aria-label="Caminho de um evento, da câmera ao registro">
+          <defs>
+            <linearGradient id="pathg" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#2EC2B3"/><stop offset="100%" stop-color="#FFC24B"/>
+            </linearGradient>
+          </defs>
+          <rect width="800" height="620" fill="#0A0F10"/>
+          <g stroke="rgba(242,244,246,.07)" stroke-width="1">
+            <path d="M0 110H800M0 250H800M0 390H800M0 520H800M150 0V620M330 0V620M520 0V620M680 0V620"/>
+          </g>
+          <!-- limite da planta -->
+          <path d="M70 40 L730 40 L730 580 L70 580 Z" fill="rgba(46,194,179,.045)" stroke="rgba(46,194,179,.22)"/>
+          <!-- linha de produção -->
+          <rect x="105" y="470" width="330" height="70" fill="rgba(242,244,246,.05)" stroke="rgba(242,244,246,.14)"/>
+          <text x="115" y="497" fill="rgba(242,244,246,.42)" font-family="IBM Plex Mono, monospace" font-size="11">LINHA 04 · PRENSA</text>
+          <!-- borda / armário -->
+          <rect x="255" y="380" width="150" height="62" fill="rgba(79,168,255,.07)" stroke="rgba(79,168,255,.28)"/>
+          <!-- sala de servidores -->
+          <rect x="390" y="270" width="170" height="80" fill="rgba(46,194,179,.07)" stroke="rgba(46,194,179,.3)"/>
+          <!-- sala de operação -->
+          <rect x="490" y="140" width="150" height="80" fill="rgba(255,194,75,.07)" stroke="rgba(255,194,75,.32)"/>
+          <path id="route" d="M140 530 C 210 500, 245 470, 300 430 S 400 380, 460 330 S 545 265, 565 195 S 645 130, 690 95"
+                fill="none" stroke="url(#pathg)" stroke-width="2.4" stroke-dasharray="1400" stroke-dashoffset="1400"/>
+          <g id="stops"></g>
+        </svg>
+      </div>
+      <div class="walk-panel">
+        <p class="eyebrow" id="wStop">Etapa 1 de 5</p>
+        <h3 id="wTitle">A câmera que já está lá</h3>
+        <p id="wText">O ponto de partida é o parque instalado.</p>
+        <div class="audio-line">
+          <span class="wavebar" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+          <span id="wAudio">integração somente leitura</span>
+        </div>
+        <div class="walk-nav" id="wNav"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- NÚMEROS -->
+  <section id="numeros">
+    <div class="s"><h3 data-count="6">0</h3><p>Modos de visão trocados em operação, sem novo treino</p></div>
+    <div class="s"><h3 data-count="72">0</h3><p>Verificações automáticas rodadas antes de cada entrega</p></div>
+    <div class="s"><h3 data-count="180" data-suffix="ms">0</h3><p>Latência p95 da inferência na borda, medida por sítio</p></div>
+    <div class="s"><h3 data-count="0" data-zero="Zero">0</h3><p>Escritas no CLP. A integração com a automação é somente leitura</p></div>
+  </section>
+
+  <!-- CASOS -->
+  <section id="casos">
+    <div>
+      <p class="eyebrow">Onde já está rodando</p>
+      <h2 class="big" style="margin-top:16px">Quatro problemas<br>que a câmera<br>resolve sozinha</h2>
+      <p class="lede" style="margin-top:22px">Arraste um cartão para ver o próximo. Toque para ler o caso inteiro.</p>
+      <p class="deck-hint">arraste, jogue para o lado ou use as setas</p>
+    </div>
+    <div class="deck" id="deck" tabindex="0" aria-label="Casos de uso, use as setas para navegar"></div>
+  </section>
+
+  <!-- AO VIVO -->
+  <section id="aovivo">
+    <p class="eyebrow">Simulação</p>
+    <h2 class="big" style="margin-top:16px">O mesmo quadro,<br>seis leituras</h2>
+    <div class="sound-grid">
+      <ul class="sslist" id="ssList"></ul>
+      <div class="visual">
+        <canvas id="viz"></canvas>
+        <div class="badge" id="ssBadge"></div>
+        <button class="play" id="ssPlay" aria-pressed="false">
+          <span id="ssIcon">&#9654;</span><span id="ssLabel">Iniciar a esteira</span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- AJUDA -->
+  <section id="ajuda">
+    <div>
+      <p class="eyebrow">Dúvidas frequentes</p>
+      <h2 class="big" style="margin-top:16px">O que perguntam<br>antes de aprovar</h2>
+      <p class="lede" style="margin-top:22px">Se faltar alguma, escreva para vps@gplansis.com e um engenheiro responde.</p>
+    </div>
+    <div class="acc" id="acc"></div>
+  </section>
+
+  <!-- CHAMADA -->
+  <section id="contato">
+    <h2 class="split">Comece por <em>uma câmera</em>.</h2>
+    <p class="lede">Um ponto de leitura, um modo, duas semanas. Se o número não fechar com o apontamento,
+      você descobre antes de investir em estação dedicada.</p>
+    <div class="stores">
+      <a class="pill solid" href="mailto:vps@gplansis.com?subject=Demonstra%C3%A7%C3%A3o%20VisionDesk%20VPS">Agendar demonstração</a>
+      <a class="pill" href="mailto:vps@gplansis.com?subject=Arquitetura%20VisionDesk%20VPS">Pedir a arquitetura</a>
+      <a class="pill" href="/app">Entrar no sistema</a>
+    </div>
+    <footer>
+      <span>VisionDesk · VPS — por GPlan</span>
+      <nav>
+        <a href="#modos">Modos</a><a href="#perspectivas">Perspectivas</a>
+        <a href="#decisao">A decisão</a><a href="#ajuda">Ajuda</a><a href="#contato">Contato</a><a href="/app">Entrar</a>
+      </nav>
+      <span>vps.gplansis.com</span>
+    </footer>
+  </section>
+</div>
+
+<!-- LEITOR -->
+<div id="reader" role="dialog" aria-modal="true" aria-label="Caso de uso">
+  <div class="sheet">
+    <button class="close" id="readerClose">Fechar</button>
+    <p class="eyebrow" id="rCat">Leitura</p>
+    <h2 id="rTitle"></h2>
+    <div id="rBody"></div>
+  </div>
+</div>
+<script>
+"use strict";
+/* ============================================================
+   0. UTILIDADES
+   ============================================================ */
+const R = (s,c=document)=>c.querySelector(s), RA=(s,c=document)=>[...c.querySelectorAll(s)];
+const clamp=(v,a=0,b=1)=>Math.min(b,Math.max(a,v));
+const lerp=(a,b,t)=>a+(b-a)*t;
+const ease=t=>t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const pad2 = n => String(n).padStart(2,'0');
+
+/* ============================================================
+   1. QUEBRA DE TEXTO EM PALAVRAS
+   ============================================================ */
+RA('.split').forEach(el=>{
+  const html = el.innerHTML;
+  el.innerHTML = html.replace(/(<[^>]+>)|([^<]+)/g,(m,tag,txt)=>{
+    if(tag) return tag;
+    return txt.split(/(\s+)/).map(w=> w.trim()? `<span class="l"><i>${w}</i></span>` : w).join('');
+  });
+  RA('i',el).forEach((i,k)=> i.style.transitionDelay = (k*0.045)+'s');
+});
+
+/* ============================================================
+   2. ROLAGEM SUAVE (scroller próprio, sem dependência)
+   ============================================================ */
+const VP = R('#viewport');
+const Scroll = { y:0, target:0, h:0, vh:innerHeight, smooth: !REDUCED && innerWidth>820 };
+if(!Scroll.smooth) document.documentElement.classList.add('no-smooth');
+
+function measure(){
+  Scroll.vh = innerHeight;
+  Scroll.h = VP.getBoundingClientRect().height;
+  if(Scroll.smooth) document.body.style.height = Scroll.h + 'px';
+  else document.body.style.height='auto';
+}
+new ResizeObserver(measure).observe(VP);
+addEventListener('resize',()=>{ Scroll.smooth = !REDUCED && innerWidth>820;
+  document.documentElement.classList.toggle('no-smooth',!Scroll.smooth); measure(); });
+
+/* ============================================================
+   3. CAMPO WEBGL — névoa industrial
+   ============================================================ */
+(function webglField(){
+  const cv = R('#field');
+  const gl = cv.getContext('webgl', {antialias:false, alpha:true});
+  if(!gl || REDUCED) return;
+  const vs = `attribute vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
+  const fs = `precision highp float;
+  uniform vec2 u_res; uniform float u_t, u_scroll; uniform vec2 u_m;
+  float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+  float noise(vec2 p){ vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.-2.*f);
+    return mix(mix(hash(i),hash(i+vec2(1,0)),u.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x),u.y); }
+  float fbm(vec2 p){ float v=0., a=.5; mat2 m=mat2(1.6,1.2,-1.2,1.6);
+    for(int i=0;i<6;i++){ v+=a*noise(p); p=m*p; a*=.5; } return v; }
+  void main(){
+    vec2 p = (gl_FragCoord.xy - .5*u_res.xy)/u_res.y;
+    float t = u_t*.035;
+    vec2 q = vec2(fbm(p*1.4 + t), fbm(p*1.4 + vec2(3.2,1.7) - t));
+    vec2 r = vec2(fbm(p*2.0 + 3.0*q + vec2(1.7,9.2) + t*1.2 + u_scroll*1.5),
+                  fbm(p*2.0 + 3.0*q + vec2(8.3,2.8) - t*0.9 + u_scroll*1.0));
+    float f = fbm(p*1.7 + 2.4*r);
+    vec3 teal  = vec3(0.18,0.76,0.70);
+    vec3 sky   = vec3(0.31,0.66,1.00);
+    vec3 slate = vec3(0.21,0.24,0.25);
+    vec3 amber = vec3(1.00,0.76,0.29);
+    vec3 col = mix(slate, teal, clamp(f*f*2.4,0.,1.));
+    col = mix(col, sky, clamp(length(q)*.55,0.,1.));
+    col = mix(col, amber, clamp(r.x*r.x*.35,0.,1.));
+    float md = length(p - u_m);
+    col += 0.12*exp(-md*3.4)*vec3(0.85,1.0,0.98);
+    float vig = smoothstep(1.35,0.12,length(p*vec2(1.,1.25)));
+    col *= vig;
+    col *= 0.30 + 0.26*f;
+    float dark = smoothstep(0.0,0.5,u_scroll);
+    col *= mix(1.0,0.38,dark);
+    gl_FragColor = vec4(col,1.0);
+  }`;
+  function sh(t,s){ const o=gl.createShader(t); gl.shaderSource(o,s); gl.compileShader(o); return o; }
+  const pr = gl.createProgram();
+  gl.attachShader(pr,sh(gl.VERTEX_SHADER,vs)); gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,fs));
+  gl.linkProgram(pr); gl.useProgram(pr);
+  const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(pr,'p'); gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+  const U = n=>gl.getUniformLocation(pr,n);
+  const uRes=U('u_res'), uT=U('u_t'), uS=U('u_scroll'), uM=U('u_m');
+  let mx=0,my=0,tmx=0,tmy=0;
+  addEventListener('pointermove',e=>{ tmx=(e.clientX-innerWidth/2)/innerHeight; tmy=-(e.clientY-innerHeight/2)/innerHeight; });
+  function size(){ const d=Math.min(devicePixelRatio||1,1.5);
+    cv.width=innerWidth*d; cv.height=innerHeight*d; gl.viewport(0,0,cv.width,cv.height); }
+  size(); addEventListener('resize',size);
+  cv.classList.add('ready');
+  Field = (t)=>{ mx=lerp(mx,tmx,.06); my=lerp(my,tmy,.06);
+    gl.uniform2f(uRes,cv.width,cv.height); gl.uniform1f(uT,t);
+    gl.uniform1f(uS, clamp(Scroll.y/Math.max(1,Scroll.h-Scroll.vh)));
+    gl.uniform2f(uM,mx,my); gl.drawArrays(gl.TRIANGLES,0,3); };
+})();
+var Field = window.Field || null;
+
+/* ============================================================
+   4. CURSOR
+   ============================================================ */
+(function(){
+  const c = R('#cursor'); let x=innerWidth/2,y=innerHeight/2,tx=x,ty=y;
+  addEventListener('pointermove',e=>{tx=e.clientX;ty=e.clientY});
+  document.addEventListener('pointerover',e=>{
+    const t=e.target.closest('a,button,summary,.card,.deck article,.stop');
+    c.classList.toggle('grow', !!t);
+  });
+  Cursor = ()=>{ x=lerp(x,tx,.22); y=lerp(y,ty,.22); c.style.transform=`translate(${x}px,${y}px) translate(-50%,-50%)`; };
+})();
+var Cursor = window.Cursor;
+
+/* ============================================================
+   5. CONTEÚDO
+   ============================================================ */
+const PERSPECTIVAS=[
+  {n:'ÓRBITA', d:'A malha de sítios sobre o globo, com o enlace entre planta e centro de operação.',
+   m:'global', u:'sítios ativos', g:['#2EC2B3','#0f4f4a','#04100E']},
+  {n:'PLANTA', d:'O piso visto de cima, com o cone de cobertura de cada câmera desenhado sobre o layout.',
+   m:'planta', u:'cones de visão', g:['#4FA8FF','#123A7A','#05101d']},
+  {n:'FRUSTUM', d:'O volume que a câmera enxerga, com os planos de ROI e as caixas de detecção vivas.',
+   m:'câmera', u:'regiões de interesse', g:['#7BE5CF','#1d5f5a','#04100F']},
+  {n:'PIPELINE', d:'O caminho da inferência, do quadro à borda, da borda ao modelo e do modelo ao portão humano.',
+   m:'inferência', u:'nós do fluxo', g:['#FFC24B','#8a4a13','#170d05']},
+  {n:'TENSOR', d:'A pilha do modelo camada a camada, para explicar por que o veredito saiu como saiu.',
+   m:'modelo', u:'camadas', g:['#B49CFF','#3a2a7a','#0a0716']},
+  {n:'FLUXO', d:'A linha do tempo em hélice: cada evento de Tag-ID onde caiu, quando e quem confirmou.',
+   m:'tempo', u:'eventos por turno', g:['#FF8A5B','#7a2c1b','#160805']}
+];
+const ETAPAS=[
+  {x:140,y:530,n:'Câmera instalada',
+   t:'O ponto de partida é o parque que a planta já tem: IP fixa, RTSP e um switch de chão. A câmera continua fazendo o que fazia; o VPS só passa a assinar o quadro com sítio, câmera e horário.',
+   a:'RTSP · sem obra elétrica · sem trocar o parque'},
+  {x:300,y:430,n:'Inferência na borda',
+   t:'O modelo leve roda perto da câmera: OCR, detecção e rastreio em cadência de linha. É aqui que 9 de cada 10 eventos terminam, sem sair da planta e sem depender de link.',
+   a:'p95 de 180 ms · roda offline'},
+  {x:460,y:330,n:'Modelo de linguagem visual',
+   t:'Quando a cena é aberta demais para uma regra — descrever uma avaria, julgar um acabamento — só quadros amostrados sobem para o modelo. O modelo é hospedado por você, não por terceiros.',
+   a:'amostragem · modelo soberano · sem envio contínuo'},
+  {x:565,y:195,n:'Portão humano',
+   t:'A proposta entra na fila de confirmação com confiança, quadro e histórico ao lado. Recusar exige justificativa. Nada vira verdade no sistema por conta própria.',
+   a:'fila de confirmação · recusa exige motivo'},
+  {x:690,y:95,n:'Registro encadeado',
+   t:'O evento confirmado vira linha imutável no banco, encadeada por hash, e alimenta as visões de indicador. Auditoria consegue refazer o caminho inteiro de qualquer número.',
+   a:'PostgreSQL · encadeamento por hash · trilha auditável'}
+];
+const CASOS=[
+  {c:'LEITURA', t:'Lote errado na etiqueta',
+   bg:'linear-gradient(150deg,#7BE5CF,#2EC2B3)',
+   b:['Impressora a jato marca o lote na embalagem secundária. Uma vez por semana alguém troca a bobina e o código sai deslocado, ilegível ou com a validade da ordem anterior.',
+      'A câmera lê o código no mesmo ponto em que a caixa já passa e compara com a ordem aberta no ERP. Divergência para a linha antes da paletização, não no recebimento do cliente.',
+      'O ganho não é o OCR. É o momento: a diferença entre reimprimir 40 caixas e recolher um lote inteiro do mercado.']},
+  {c:'SEGURANÇA', t:'EPI na área de manobra',
+   bg:'linear-gradient(150deg,#4FA8FF,#2C6FD0)',
+   b:['A doca tem empilhadeira e pedestre no mesmo piso. O procedimento existe, o treinamento existe, e mesmo assim alguém atravessa sem capacete quando está com pressa.',
+      'A detecção abre alarme no ciclo da ISA-18.2: não reconhecido, reconhecido, retorno ao normal. Alarme suprimido durante manutenção fica registrado como suprimido, com motivo e responsável.',
+      'O relatório mensal deixa de ser percepção e vira contagem. Discussões sobre segurança melhoram quando as duas partes olham o mesmo número.']},
+  {c:'CONTAGEM', t:'A peça que o apontamento não viu',
+   bg:'linear-gradient(150deg,#FFC24B,#E08A1E)',
+   b:['O apontamento do turno fecha por lote e por memória. O número chega ao PCP com atraso e com desvio, e ninguém sabe se o problema foi refugo, retrabalho ou digitação.',
+      'Uma linha virtual na saída da prensa conta a passagem física e grava a série minuto a minuto. Na reconciliação, o desvio aparece com hora e câmera.',
+      'Em duas semanas de operação o desvio deixa de ser um mistério de fechamento e vira uma lista de eventos com causa.']},
+  {c:'QUALIDADE', t:'Veredito que alguém assina',
+   bg:'linear-gradient(150deg,#C6CDD1,#7D8286)',
+   b:['Inspeção visual cansa. No fim do turno o mesmo defeito passa, e a reclamação chega três semanas depois sem rastro de quem aprovou.',
+      'O modo ANALISAR propõe OK, NOK ou pendente com a imagem e a confiança ao lado. O operador confirma ou recusa, e a recusa exige justificativa em lista fechada.',
+      'Ninguém é substituído. O que muda é que a decisão passa a ter autor, horário e evidência anexada — e isso é o que a auditoria pede.']}
+];
+const SIM_MODOS=[
+  {k:'LER',       d:'Extrai o código impresso e confere com a ordem aberta', c:'#2EC2B3'},
+  {k:'DETECTAR',  d:'Marca o que está presente, ausente ou fora de posição', c:'#4FA8FF'},
+  {k:'RASTREAR',  d:'Mantém a mesma identidade entre quadros e câmeras',     c:'#7BE5CF'},
+  {k:'CONTAR',    d:'Conta a passagem por uma linha virtual',                c:'#FFC24B'},
+  {k:'DESCREVER', d:'Descreve a cena em texto quando não há regra fechada',  c:'#B49CFF'},
+  {k:'ANALISAR',  d:'Propõe veredito e manda para a fila de confirmação',    c:'#FF8A5B'}
+];
+const FAQS=[
+  ['O VPS escreve alguma coisa no CLP?','Não. A integração com a automação é somente leitura, na direção do processo para o VPS. Qualquer ação sobre a linha continua sendo feita pelo sistema de controle, por uma pessoa. É assim por projeto, não por configuração.'],
+  ['Preciso trocar as câmeras da planta?','Na maioria dos casos, não. Começamos com o parque instalado via RTSP e só indicamos câmera nova quando o ponto exige resolução, lente ou iluminação que a atual não entrega. Essa avaliação sai no primeiro levantamento.'],
+  ['Onde os modelos rodam e para onde vão as imagens?','O modelo leve roda na borda, dentro da planta. Quando um quadro precisa do modelo de linguagem visual, ele vai para uma instância hospedada por você. Não há envio contínuo de vídeo para fora e não há dependência de nuvem de terceiros para a operação.'],
+  ['E a LGPD, já que aparecem pessoas nas imagens?','O projeto trata imagem de pessoa como dado pessoal: base legal declarada, aviso no local, retenção com prazo, mascaramento quando o caso de uso não exige identidade e acesso por perfil. A trilha de quem viu o quê também fica registrada.'],
+  ['Como isso conversa com ERP, MES e o histórico da planta?','O evento confirmado vira registro no PostgreSQL e é exposto em visões prontas para BI, além de eventos para quem quiser consumir. A conciliação com apontamento e ordem de produção é parte do escopo, não um projeto separado.'],
+  ['Quanto tempo até o primeiro número confiável?','Duas a quatro semanas para um ponto de leitura com um modo ativo, incluindo levantamento, instalação de borda e o período em que o resultado roda em paralelo com o processo atual antes de valer.']
+];
+
+/* ============================================================
+   6. PERSPECTIVAS
+   ============================================================ */
+const track = R('#track');
+PERSPECTIVAS.forEach((j,i)=>{
+  const el=document.createElement('article'); el.className='card';
+  el.innerHTML=`<div class="veil" style="background:
+      radial-gradient(120% 90% at ${20+i*12}% 12%, ${j.g[0]}, ${j.g[1]} 52%, ${j.g[2]})"></div>
+    <span class="num">${pad2(i+1)}</span>
+    <h3>${j.n}</h3><p class="desc">${j.d}</p>
+    <div class="meta"><span>${j.m}</span><span>${j.u}</span></div>`;
+  track.appendChild(el);
+});
+
+/* ============================================================
+   7. O FIO DA DECISÃO
+   ============================================================ */
+const stopsG=R('#stops'), NS='http://www.w3.org/2000/svg';
+ETAPAS.forEach((s,i)=>{
+  const g=document.createElementNS(NS,'g'); g.setAttribute('class','stop'+(i===0?' active':''));
+  g.setAttribute('tabindex','0'); g.setAttribute('role','button'); g.setAttribute('aria-label',s.n);
+  const flip = s.x>500;
+  const tx = flip ? s.x-14 : s.x+14;
+  g.innerHTML=`<circle class="hit" cx="${s.x}" cy="${s.y}" r="26"></circle>
+    <circle class="ring" cx="${s.x}" cy="${s.y}" r="9" stroke-width="1.4"></circle>
+    <circle class="dot" cx="${s.x}" cy="${s.y}" r="4.5"></circle>
+    <text x="${tx}" y="${s.y+4}"${flip?' text-anchor="end"':''}>${pad2(i+1)} ${s.n}</text>`;
+  const go=()=>setStop(i);
+  g.addEventListener('click',go);
+  g.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();go();}});
+  stopsG.appendChild(g);
+});
+const wNav=R('#wNav');
+ETAPAS.forEach((s,i)=>{
+  const b=document.createElement('button'); b.textContent=pad2(i+1);
+  b.setAttribute('aria-pressed', i===0); b.setAttribute('aria-label','Etapa '+(i+1)+': '+s.n);
+  b.onclick=()=>setStop(i); wNav.appendChild(b);
+});
+function setStop(i){
+  const s=ETAPAS[i];
+  R('#wStop').textContent=`Etapa ${i+1} de ${ETAPAS.length}`;
+  R('#wTitle').textContent=s.n; R('#wText').textContent=s.t; R('#wAudio').textContent=s.a;
+  RA('#stops .stop').forEach((g,k)=>g.classList.toggle('active',k===i));
+  RA('#wNav button').forEach((b,k)=>b.setAttribute('aria-pressed',k===i));
+}
+setStop(0);
+
+/* ============================================================
+   8. BARALHO DE CASOS
+   ============================================================ */
+const deck=R('#deck');
+let order=CASOS.map((_,i)=>i);
+CASOS.forEach((p,i)=>{
+  const a=document.createElement('article');
+  a.style.background=p.bg;
+  a.innerHTML=`<div><span class="cat">${p.c}</span></div>
+    <div><h3>${p.t}</h3><br><span class="read">Ler o caso</span></div>`;
+  a.dataset.i=i; deck.appendChild(a);
+});
+const cards=RA('article',deck);
+function layout(){
+  order.forEach((idx,pos)=>{
+    const el=cards[idx];
+    el.style.transition='transform .7s cubic-bezier(.22,.61,.24,1), opacity .5s';
+    el.style.transform=`translate3d(0,${pos*-10}px,0) scale(${1-pos*.045}) rotate(${pos%2?1.1:-1.3}deg)`;
+    el.style.zIndex=String(20-pos);
+    el.style.opacity= pos>2?0:1;
+    el.style.pointerEvents= pos===0?'auto':'none';
+  });
+}
+layout();
+function cycle(dir=1){
+  if(dir>0) order.push(order.shift()); else order.unshift(order.pop());
+  layout();
+}
+(function(){
+  let sx=0,sy=0,dragging=false,cur=null,moved=0;
+  deck.addEventListener('pointerdown',e=>{
+    const el=e.target.closest('article'); if(!el||el.style.pointerEvents==='none')return;
+    dragging=true;cur=el;sx=e.clientX;sy=e.clientY;moved=0;
+    el.style.transition='none'; el.setPointerCapture(e.pointerId);
+  });
+  deck.addEventListener('pointermove',e=>{
+    if(!dragging)return; const dx=e.clientX-sx, dy=e.clientY-sy; moved=Math.hypot(dx,dy);
+    cur.style.transform=`translate3d(${dx}px,${dy}px,0) rotate(${dx*.05}deg)`;
+  });
+  const end=e=>{
+    if(!dragging)return; dragging=false;
+    const dx=(e.clientX||0)-sx;
+    if(Math.abs(dx)>110){
+      cur.style.transition='transform .55s cubic-bezier(.22,.61,.24,1), opacity .4s';
+      cur.style.transform=`translate3d(${dx>0?600:-600}px,60px,0) rotate(${dx*.06}deg)`;
+      setTimeout(()=>cycle(1),240);
+    } else if(moved<6){ openReader(+cur.dataset.i); layout(); }
+    else layout();
+  };
+  deck.addEventListener('pointerup',end); deck.addEventListener('pointercancel',end);
+  deck.addEventListener('keydown',e=>{
+    if(e.key==='ArrowRight'){cycle(1);e.preventDefault();}
+    if(e.key==='ArrowLeft'){cycle(-1);e.preventDefault();}
+    if(e.key==='Enter'){openReader(order[0]);}
+  });
+})();
+const reader=R('#reader');
+function openReader(i){
+  const p=CASOS[i];
+  R('#rCat').textContent=p.c; R('#rTitle').textContent=p.t;
+  R('#rBody').innerHTML=p.b.map(x=>`<p>${x}</p>`).join('');
+  reader.classList.add('open'); document.body.classList.add('is-locked');
+  R('#readerClose').focus();
+}
+function closeReader(){ reader.classList.remove('open'); document.body.classList.remove('is-locked'); }
+R('#readerClose').onclick=closeReader;
+reader.addEventListener('click',e=>{ if(e.target===reader) closeReader(); });
+addEventListener('keydown',e=>{ if(e.key==='Escape') closeReader(); });
+
+/* ============================================================
+   9. AJUDA
+   ============================================================ */
+const acc=R('#acc');
+FAQS.forEach(([q,a])=>{
+  const d=document.createElement('details');
+  d.innerHTML=`<summary>${q}<span class="ic" aria-hidden="true"></span></summary><div class="ans">${a}</div>`;
+  d.addEventListener('toggle',()=>{ if(d.open) RA('details',acc).forEach(o=>{if(o!==d)o.open=false}); });
+  acc.appendChild(d);
+});
+
+/* ============================================================
+   10. SIMULAÇÃO — a mesma esteira, seis leituras
+   ============================================================ */
+const ssList=R('#ssList');
+let simMode=0, simOn=false;
+SIM_MODOS.forEach((s,i)=>{
+  const li=document.createElement('li');
+  li.innerHTML=`<button aria-pressed="${i===0}"><span class="nm">${s.k}</span><span class="dur">${s.d}</span></button>`;
+  li.querySelector('button').onclick=()=>selectMode(i);
+  ssList.appendChild(li);
+});
+function selectMode(i){
+  simMode=i;
+  RA('#ssList button').forEach((b,k)=>b.setAttribute('aria-pressed',k===i));
+  Sim.caption=''; Sim.capChars=0;
+}
+function toggleSim(){
+  simOn=!simOn;
+  R('#ssIcon').innerHTML= simOn?'&#10073;&#10073;':'&#9654;';
+  R('#ssLabel').textContent= simOn?'Pausar a esteira':'Iniciar a esteira';
+  R('#ssPlay').setAttribute('aria-pressed',simOn);
+}
+R('#ssPlay').onclick=toggleSim;
+
+const vizCv=R('#viz'), vctx=vizCv.getContext('2d');
+function vizResize(){ const r=vizCv.getBoundingClientRect(), d=Math.min(devicePixelRatio||1,2);
+  vizCv.width=Math.max(1,r.width*d); vizCv.height=Math.max(1,r.height*d); vctx.setTransform(d,0,0,d,0,0); }
+addEventListener('resize',vizResize); vizResize();
+
+const LEGENDAS=[
+  'Caixa de papelão fechada, fita central alinhada, código impresso no canto superior direito.',
+  'Peça metálica com marca de arraste na face superior; contorno regular, sem rebarba visível.',
+  'Embalagem levemente amassada na aresta esquerda; conteúdo aparentemente intacto.'
+];
+const Sim={ items:[], t:0, last:0, travel:0, count:0, fila:0, nextId:27, spawn:0,
+  caption:'', capChars:0, capIdx:0, verdictSeed:0 };
+
+function simUpdate(dt){
+  const r=vizCv.getBoundingClientRect(), W=r.width;
+  const v = 62; /* px/s */
+  if(simOn){
+    Sim.t+=dt; Sim.travel+=v*dt;
+    Sim.spawn-=dt;
+    if(Sim.spawn<=0){
+      Sim.spawn = 1.9;
+      const nok = Math.random()<0.22;
+      Sim.items.push({ x:-90, id:Sim.nextId++, code:'L-'+(2400+Math.floor(Math.random()*99)),
+        nok, counted:false, conf:(0.86+Math.random()*0.13), trail:[] });
+    }
+    Sim.items.forEach(it=>{
+      it.x += v*dt;
+      if(Sim.t*60%2<1) it.trail.push(it.x);
+      if(it.trail.length>26) it.trail.shift();
+      if(!it.counted && it.x > W*0.66){ it.counted=true; Sim.count++;
+        if(it.nok) Sim.fila++; }
+    });
+    Sim.items = Sim.items.filter(it=> it.x < W+120);
+    /* legenda digitada, só no modo DESCREVER */
+    if(SIM_MODOS[simMode].k==='DESCREVER'){
+      if(Sim.capChars < LEGENDAS[Sim.capIdx].length) Sim.capChars += dt*34;
+      else if(Sim.capChars < LEGENDAS[Sim.capIdx].length+40) Sim.capChars += dt*34;
+      else { Sim.capIdx=(Sim.capIdx+1)%LEGENDAS.length; Sim.capChars=0; }
+    }
+  }
+}
+
+function simDraw(){
+  const r=vizCv.getBoundingClientRect(), W=r.width, H=r.height;
+  if(!W||!H) return;
+  const M=SIM_MODOS[simMode], col=M.c;
+  vctx.clearRect(0,0,W,H);
+
+  /* grade de fundo */
+  vctx.strokeStyle='rgba(242,244,246,.05)'; vctx.lineWidth=1;
+  for(let gx=0;gx<W;gx+=W/12){ vctx.beginPath(); vctx.moveTo(gx,0); vctx.lineTo(gx,H); vctx.stroke(); }
+  for(let gy=0;gy<H;gy+=H/8){ vctx.beginPath(); vctx.moveTo(0,gy); vctx.lineTo(W,gy); vctx.stroke(); }
+
+  /* esteira */
+  const beltY=H*0.70, bw=Math.min(74,W*0.115), bh=bw*0.62;
+  vctx.strokeStyle='rgba(242,244,246,.22)';
+  vctx.beginPath(); vctx.moveTo(0,beltY); vctx.lineTo(W,beltY); vctx.stroke();
+  vctx.beginPath(); vctx.moveTo(0,beltY+16); vctx.lineTo(W,beltY+16); vctx.stroke();
+  vctx.strokeStyle='rgba(242,244,246,.12)';
+  const step=34, off=Sim.travel%step;
+  for(let x=-step+off;x<W+step;x+=step){
+    vctx.beginPath(); vctx.moveTo(x,beltY); vctx.lineTo(x-14,beltY+16); vctx.stroke();
+  }
+
+  /* linha virtual de contagem */
+  if(M.k==='CONTAR'){
+    const lx=W*0.66;
+    vctx.setLineDash([6,6]); vctx.strokeStyle=col; vctx.globalAlpha=.9;
+    vctx.beginPath(); vctx.moveTo(lx,H*0.12); vctx.lineTo(lx,beltY+16); vctx.stroke();
+    vctx.setLineDash([]); vctx.globalAlpha=1;
+  }
+
+  vctx.font='500 11px "IBM Plex Mono", monospace';
+  vctx.textBaseline='alphabetic';
+
+  Sim.items.forEach(it=>{
+    const x=it.x, y=beltY-bh;
+    /* rastro */
+    if(M.k==='RASTREAR'){
+      it.trail.forEach((tx,k)=>{
+        vctx.globalAlpha=.05+.30*(k/Math.max(1,it.trail.length));
+        vctx.fillStyle=col;
+        vctx.fillRect(tx+bw/2-1.5, beltY-bh/2, 3, 3);
+      });
+      vctx.globalAlpha=1;
+    }
+    /* caixa */
+    vctx.fillStyle='rgba(242,244,246,.10)';
+    vctx.strokeStyle='rgba(242,244,246,.38)'; vctx.lineWidth=1;
+    vctx.fillRect(x,y,bw,bh); vctx.strokeRect(x+.5,y+.5,bw-1,bh-1);
+    vctx.beginPath(); vctx.moveTo(x+bw*.5,y); vctx.lineTo(x+bw*.5,y+bh); vctx.stroke();
+
+    if(x<-bw||x>W) return;
+
+    if(M.k==='LER'){
+      const lw=bw*.42, lh=10, lx=x+bw*.5+6, ly=y+7;
+      vctx.strokeStyle=col; vctx.setLineDash([3,3]);
+      vctx.strokeRect(lx,ly,lw,lh); vctx.setLineDash([]);
+      vctx.fillStyle=col; vctx.fillText(it.code, x, y-10);
+      vctx.fillStyle='rgba(242,244,246,.55)'; vctx.fillText('OP 90412', x, y-24);
+    }
+    if(M.k==='DETECTAR'){
+      vctx.strokeStyle=col; vctx.lineWidth=1.4;
+      vctx.strokeRect(x-5,y-5,bw+10,bh+10);
+      const c=10;
+      vctx.lineWidth=2.4;
+      [[x-5,y-5,1,1],[x+bw+5,y-5,-1,1],[x-5,y+bh+5,1,-1],[x+bw+5,y+bh+5,-1,-1]].forEach(([cx,cy,sx,sy])=>{
+        vctx.beginPath(); vctx.moveTo(cx+sx*c,cy); vctx.lineTo(cx,cy); vctx.lineTo(cx,cy+sy*c); vctx.stroke();
+      });
+      vctx.lineWidth=1;
+      vctx.fillStyle=col; vctx.fillText('peça  '+it.conf.toFixed(2), x-5, y-12);
+    }
+    if(M.k==='RASTREAR'){
+      vctx.strokeStyle=col; vctx.lineWidth=1.2; vctx.strokeRect(x-4,y-4,bw+8,bh+8);
+      vctx.fillStyle=col; vctx.fillText('ID '+it.id, x-4, y-11);
+    }
+    if(M.k==='CONTAR'){
+      vctx.strokeStyle= it.counted? 'rgba(242,244,246,.3)' : col;
+      vctx.lineWidth=1.2; vctx.strokeRect(x-3,y-3,bw+6,bh+6);
+    }
+    if(M.k==='ANALISAR'){
+      const ok=!it.nok, cc= ok? '#2EC2B3' : '#FF5B2E';
+      vctx.strokeStyle=cc; vctx.lineWidth=1.6; vctx.strokeRect(x-4,y-4,bw+8,bh+8);
+      vctx.fillStyle=cc; vctx.fillRect(x-4,y-22,ok?30:38,15);
+      vctx.fillStyle='#05100E'; vctx.fillText(ok?'OK':'NOK', x, y-11);
+      if(!ok){ vctx.fillStyle='rgba(255,91,46,.85)'; vctx.fillText('fila humana', x+44, y-11); }
+    }
+  });
+
+  /* sobreposições fixas */
+  vctx.font='500 11px "IBM Plex Mono", monospace';
+  if(M.k==='CONTAR'){
+    vctx.fillStyle=col; vctx.font='300 40px "Space Grotesk", sans-serif';
+    vctx.fillText(String(Sim.count).padStart(4,'0'), 18, H*0.30);
+    vctx.font='500 11px "IBM Plex Mono", monospace';
+    vctx.fillStyle='rgba(242,244,246,.55)'; vctx.fillText('peças na linha virtual', 18, H*0.30+18);
+  }
+  if(M.k==='DESCREVER'){
+    const txt=LEGENDAS[Sim.capIdx].slice(0,Math.floor(Sim.capChars));
+    const bx=16, by=H*0.14, bwid=W-32;
+    vctx.fillStyle='rgba(8,11,12,.72)'; vctx.fillRect(bx,by,bwid,54);
+    vctx.strokeStyle='rgba(180,156,255,.5)'; vctx.strokeRect(bx+.5,by+.5,bwid-1,53);
+    vctx.fillStyle='rgba(242,244,246,.9)';
+    /* quebra simples em duas linhas */
+    const maxc=Math.floor(bwid/6.6);
+    vctx.fillText(txt.slice(0,maxc), bx+12, by+22);
+    vctx.fillText(txt.slice(maxc,maxc*2), bx+12, by+40);
+    if(simOn && Math.floor(Sim.t*2)%2===0){
+      const line = txt.length>maxc ? 1 : 0;
+      const w = vctx.measureText(txt.slice(line*maxc)).width;
+      vctx.fillRect(bx+12+w+2, by+12+line*18, 6, 12);
+    }
+  }
+  if(M.k==='ANALISAR'){
+    vctx.fillStyle='rgba(255,91,46,.9)';
+    vctx.fillText('fila de confirmação  '+String(Sim.fila).padStart(2,'0'), 18, H*0.22);
+  }
+
+  /* estado parado */
+  if(!simOn){
+    vctx.fillStyle='rgba(242,244,246,.45)';
+    vctx.fillText('esteira parada', 18, H*0.12);
+  }
+}
+const ssBadge=R('#ssBadge');
+let badgeTick=0;
+function updateBadge(){
+  const M=SIM_MODOS[simMode];
+  ssBadge.innerHTML = `modo ${M.k}<br>p95 ${simOn?(150+Math.floor(Math.sin(Sim.t)*22+22)):'—'} ms<br>${Sim.count} eventos`;
+}
+
+/* ============================================================
+   11. ARTE DAS TELAS DO COCKPIT
+   ============================================================ */
+const arts=RA('.art').map(c=>({c,ctx:c.getContext('2d'),kind:c.dataset.art}));
+function artResize(){ arts.forEach(a=>{ const r=a.c.getBoundingClientRect();
+  a.c.width=Math.max(1,r.width); a.c.height=Math.max(1,r.height); }); }
+function drawArt(t){
+  arts.forEach(a=>{
+    const {ctx:x,c}=a, W=c.width,H=c.height; if(!W)return;
+    x.clearRect(0,0,W,H); x.strokeStyle='rgba(255,255,255,.5)'; x.lineWidth=1;
+    if(a.kind==='rings'){
+      for(let k=0;k<16;k++){ x.beginPath();
+        x.ellipse(W*.5,H*.42,W*.08+k*W*.045, H*.05+k*H*.03+Math.sin(t/1400+k)*6,
+          Math.sin(t/2600+k*.4)*.3,0,Math.PI*2); x.globalAlpha=.06+ .45*(1-k/16); x.stroke(); }
+    } else if(a.kind==='waves'){
+      for(let k=0;k<20;k++){ x.beginPath();
+        for(let px=0;px<=W;px+=5){ const u=px/W;
+          const y=H*(.15+k*.04)+Math.sin(u*6+t/900+k*.5)*(8+k); px?x.lineTo(px,y):x.moveTo(px,y); }
+        x.globalAlpha=.05+.32*(1-k/20); x.stroke(); }
+    } else {
+      const step=W/9;
+      for(let gx=0;gx<=9;gx++) for(let gy=0;gy<16;gy++){
+        const o=Math.sin(gx*.6+gy*.4+t/1100);
+        x.globalAlpha=.05+.26*(o*.5+.5);
+        x.fillStyle='rgba(255,255,255,.8)';
+        x.fillRect(gx*step, gy*step*1.02, 2+o*1.6, 2+o*1.6);
+      }
+    }
+    x.globalAlpha=1;
+  });
+}
+
+/* ============================================================
+   12. CENAS DIRIGIDAS PELA ROLAGEM
+   ============================================================ */
+/* REVELAR — por IntersectionObserver, não por medição a cada quadro.
+   O observador é entregue pelo navegador mesmo quando o requestAnimationFrame
+   está estrangulado (é o que acontece no celular durante a rolagem por
+   inércia): o texto aparece na hora certa em vez de esperar o dedo parar. De
+   quebra, some um getBoundingClientRect por elemento por quadro — a conta mais
+   cara que esta página fazia num aparelho modesto. */
+const revealEls=RA('.rv, .split');
+if('IntersectionObserver' in window){
+  const olho=new IntersectionObserver((entradas)=>{
+    entradas.forEach(e=>{
+      if(!e.isIntersecting) return;
+      e.target.classList.add('in');
+      olho.unobserve(e.target);     // revelou uma vez, não volta atrás
+    });
+  // A margem negativa embaixo reproduz o gatilho antigo (vh*0.86): o elemento
+  // só conta como visível depois de entrar de fato na tela, não ao encostar.
+  },{rootMargin:'0px 0px -14% 0px'});
+  revealEls.forEach(el=>olho.observe(el));
+}
+const cockpit=R('#cockpit'), pvPin=R('#cockpit .pin');
+const screens=RA('.scr'), dots=RA('#pvDots i');
+const PV_COPY=[
+  ['LER','O código sai da embalagem e entra no sistema','A leitura acontece no ponto em que a caixa já passa. Se o lote não bate com a ordem aberta, a linha sabe antes da paletização.'],
+  ['DETECTAR','Presença, ausência e o alarme que segue norma','A detecção abre alarme no ciclo da ISA-18.2. Reconhecer, suprimir e justificar são atos com autor e horário.'],
+  ['CONTAR','A contagem física, minuto a minuto','Uma linha virtual conta o que passou e guarda a série. A conciliação com o apontamento deixa de depender de memória.'],
+  ['ANALISAR','A proposta espera alguém assinar','Veredito, confiança e imagem chegam juntos na fila. Recusar exige justificativa, e a justificativa fica no registro.']
+];
+const pvLeft=R('#pvLeft'), pvRight=R('#pvRight');
+PV_COPY.forEach((c,i)=>{
+  const box=document.createElement('div'); box.className='pv-item'+(i===0?' on':'');
+  box.innerHTML=`<p class="tag">${c[0]}</p><h3>${c[1]}</h3><p>${c[2]}</p>`;
+  (i%2===0?pvLeft:pvRight).appendChild(box);
+});
+const pvItems=RA('.pv-item');
+let pvCur=-1;
+function setPv(i){
+  if(i===pvCur)return; pvCur=i;
+  screens.forEach((s,k)=>s.classList.toggle('on',k===i));
+  pvItems.forEach((s,k)=>s.classList.toggle('on',k===i));
+  dots.forEach((d,k)=>d.classList.toggle('on',k===i));
+}
+const persp=R('#perspectivas'), jrnPin=R('#perspectivas .pin');
+const route=R('#route'), statsSec=R('#numeros');
+let statsDone=false;
+function runStats(){
+  if(statsDone)return; statsDone=true;
+  RA('#numeros h3').forEach(h=>{
+    const end=+h.dataset.count, suf=h.dataset.suffix||'', zero=h.dataset.zero;
+    if(zero){ h.textContent=zero; return; }
+    const t0=performance.now(), dur=1500;
+    (function step(t){ const p=clamp((t-t0)/dur);
+      h.innerHTML=Math.round(ease(p)*end).toLocaleString('pt-BR')+(suf?`<u>${suf}</u>`:'');
+      if(p<1) requestAnimationFrame(step); })(t0);
+  });
+}
+const nav=R('header.nav'); let lastY=0;
+
+/* PRENDER — quem prende as seções fixadas: o compositor ou o laço de quadros.
+   Quem decide é a folha de estilo (regra PRENDER NO CELULAR); aqui só se lê o
+   resultado. Com sticky, escrever transform por quadro brigaria com o
+   compositor e devolveria a falha que o sticky veio consertar. */
+let PRESO = getComputedStyle(pvPin).position === 'sticky';
+addEventListener('resize',()=>{ PRESO = getComputedStyle(pvPin).position === 'sticky'; });
+
+function updateScrollScenes(){
+  const y=Scroll.smooth?Scroll.y:scrollY, vh=Scroll.vh;
+
+  // Sem IntersectionObserver (navegador antigo), volta a medir por quadro.
+  if(!('IntersectionObserver' in window)) revealEls.forEach(el=>{
+    if(el.classList.contains('in'))return;
+    const r=el.getBoundingClientRect();
+    if(r.top < vh*0.86 && r.bottom>0) el.classList.add('in');
+  });
+
+  const pr=cockpit.getBoundingClientRect();
+  if(pr.top<vh && pr.bottom>0){
+    const total=cockpit.offsetHeight-vh;
+    const p=clamp((-pr.top)/total);
+    if(!PRESO) pvPin.style.transform=`translateY(${clamp(-pr.top,0,total)}px)`;
+    setPv(Math.min(3,Math.floor(p*4.001)));
+  }
+  const jr=persp.getBoundingClientRect();
+  if(jr.top<vh && jr.bottom>0){
+    const total=persp.offsetHeight-vh;
+    const p=clamp((-jr.top)/total);
+    if(!PRESO) jrnPin.style.transform=`translateY(${clamp(-jr.top,0,total)}px)`;
+    const dist=Math.max(0,track.scrollWidth-innerWidth+40);
+    track.style.transform=`translate3d(${-p*dist}px,0,0)`;
+  }
+  const mr=route.getBoundingClientRect();
+  if(mr.top<vh){
+    const p=clamp((vh-mr.top)/(vh*.8));
+    route.style.strokeDashoffset=String(1400*(1-p));
+  }
+  if(statsSec.getBoundingClientRect().top < vh*.8) runStats();
+
+  if(y>lastY && y>vh*.6) nav.classList.add('hide'); else nav.classList.remove('hide');
+  lastY=y;
+}
+
+const row1=R('#row1'); let mqX=0;
+(function dupe(){ row1.innerHTML+=row1.innerHTML; })();
+
+/* ============================================================
+   13. LAÇO PRINCIPAL
+   ============================================================ */
+let lastT=performance.now();
+function frame(t){
+  const dt=Math.min(.05,(t-lastT)/1000); lastT=t;
+  if(Scroll.smooth){
+    Scroll.target=scrollY;
+    Scroll.y=lerp(Scroll.y,Scroll.target,.085);
+    if(Math.abs(Scroll.target-Scroll.y)<.05) Scroll.y=Scroll.target;
+    VP.style.transform=`translate3d(0,${-Scroll.y}px,0)`;
+  } else { Scroll.y=scrollY; }
+
+  mqX-=REDUCED?0:.5; const half=row1.scrollWidth/2;
+  if(half && -mqX>=half) mqX+=half;
+  row1.style.transform=`translate3d(${mqX}px,0,0)`;
+
+  updateScrollScenes();
+  drawArt(t);
+  simUpdate(dt); simDraw();
+  if(++badgeTick%12===0) updateBadge();
+  if(Field) Field(t/1000);
+  if(Cursor) Cursor();
+  requestAnimationFrame(frame);
+}
+
+/* âncoras funcionam com o scroller próprio */
+RA('a[href^="#"]').forEach(a=>a.addEventListener('click',e=>{
+  const id=a.getAttribute('href'); if(id==='#')return;
+  const t=R(id); if(!t)return; e.preventDefault();
+  const top=t.getBoundingClientRect().top + (Scroll.smooth?Scroll.y:scrollY);
+  scrollTo({top, behavior: REDUCED?'auto':'smooth'});
+}));
+
+/* ============================================================
+   14. PARTIDA
+   ============================================================ */
+const loader=R('#loader'), bar=R('#loader .bar b'), pct=R('#loader .pct');
+let prog=0;
+requestAnimationFrame(()=>RA('#loader .word i').forEach((i,k)=>{
+  i.style.transition='transform .9s cubic-bezier(.22,.61,.24,1)'; i.style.transitionDelay=(k*.12)+'s';
+  i.style.transform='none';
+}));
+const boot=setInterval(()=>{
+  prog=Math.min(100,prog+Math.random()*13+4);
+  bar.style.right=(100-prog)+'%'; pct.textContent=Math.round(prog);
+  if(prog>=100){
+    clearInterval(boot);
+    setTimeout(()=>{
+      loader.classList.add('done');
+      setTimeout(()=>loader.remove(),800);
+      measure(); artResize(); vizResize();
+      updateScrollScenes();
+    },420);
+  }
+},130);
+
+updateBadge();
+addEventListener('resize',()=>{artResize();});
+setTimeout(()=>{measure();artResize();vizResize();},60);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
