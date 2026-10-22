@@ -95,11 +95,18 @@ ALERT_CLASSES = {"person", "car", "truck", "motorcycle", "bus", "bicycle", "dog"
 
 
 def ptbr(classe: str, plural: bool = False) -> str:
-    """Nome PT-BR (singular/plural) de uma classe COCO; fallback = própria string."""
+    """Nome PT-BR (singular/plural) da classe; fallback = própria string.
+
+    Cobre as 80 COCO aqui e, para o vocabulário maior (Objects365, 365 classes),
+    cai no catálogo de classes-alvo. Sem esse segundo passo a descrição no motor
+    local sairia meio em português e meio em inglês — "3 pessoas e 2 sneakers".
+    """
     par = COCO_PTBR.get(classe)
-    if par is None:
-        return classe
-    return par[1] if plural else par[0]
+    if par is not None:
+        return par[1] if plural else par[0]
+    from .target_classes import TARGET_150
+    alvo = TARGET_150.get(classe)
+    return alvo[0] if alvo else classe
 
 
 def _build_pt_index() -> dict[str, str]:
@@ -109,6 +116,12 @@ def _build_pt_index() -> dict[str, str]:
         idx[en] = en
         idx[sing] = en
         idx[plur] = en
+    # Vocabulário estendido: o operador escreve "capacete" ou "extintor" no
+    # critério de ANALISAR e isso precisa achar a classe do modelo.
+    from .target_classes import TARGET_150
+    for en, (pt, _grupo) in TARGET_150.items():
+        idx.setdefault(en, en)
+        idx.setdefault(pt, en)
     # sinônimos/variações comuns do operador
     extra = {
         "pessoa": "person", "pessoas": "person", "gente": "person", "homem": "person",
@@ -116,7 +129,19 @@ def _build_pt_index() -> dict[str, str]:
         "veiculo": "car", "veículo": "car", "automovel": "car", "automóvel": "car", "auto": "car",
         "caminhao": "truck", "onibus": "bus", "motocicleta": "motorcycle",
         "cao": "dog", "cão": "dog", "cachorro": "dog", "celular": "cell phone",
-        "telefone": "cell phone", "garrafa": "bottle", "caixa": "suitcase",
+        "telefone": "cell phone", "garrafa": "bottle",
+        # "caixa" era mapeado para suitcase (mala). Com o vocabulario Objects365
+        # existe a classe certa; mala continua alcancavel por "mala".
+        "caixa": "storage box", "caixas": "storage box", "contentor": "storage box",
+        # APROXIMACOES conscientes do vocabulario industrial: o modelo nao tem
+        # classe propria para estes itens, e detecta o mais proximo. Melhor um
+        # alvo aproximado e declarado aqui do que o operador digitar e nao ter
+        # deteccao nenhuma sem nunca saber por que.
+        "empilhadeira": "machinery vehicle", "retroescavadeira": "machinery vehicle",
+        "trator": "machinery vehicle", "maquina": "machinery vehicle",
+        "epi": "helmet", "capacete de seguranca": "helmet",
+        "extintor de incendio": "fire extinguisher",
+        "cone": "traffic cone", "cavalete": "traffic cone",
     }
     idx.update(extra)
     return idx

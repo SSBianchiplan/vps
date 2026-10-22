@@ -106,7 +106,7 @@ cp ../.env.example ../.env                # e preencha ANTHROPIC_API_KEY
 uvicorn app.main:app --reload --port 8000
 ```
 
-Backend em `http://localhost:8000` (docs em `/docs`, WebSocket em `/ws/stream`).
+Backend em `http://localhost:8000` (docs em `/docs` com `VISIONDESK_EXPOSE_DOCS=true`, WebSocket em `/ws/stream`).
 
 ### 2) Frontend
 

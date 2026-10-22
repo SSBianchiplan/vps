@@ -2,14 +2,25 @@
 
 NÃO é animação: muta o backend de verdade (gênese, fases, 3 correções, reconciliação,
 DONE) e devolve cada passo com resultado/ok p/ reprodução passo a passo na tela.
-Reseta o estado VPS antes de rodar (cenário limpo).
+
+DOIS MODOS
+
+  reset=False (padrão) — roda AO LADO do que já existe. Cada rodada ganha um
+  sufixo próprio nas chaves naturais (PV-2026-7781-R3f2a…), então nunca colide
+  com OPs reais nem com rodadas anteriores, e cada passo vira um evento na
+  trilha de auditoria (categoria E2E, correlation_id = id da rodada). É assim
+  que o teste vira parte da operação rastreável em vez de um botão que apaga
+  tudo antes de começar.
+
+  reset=True — apaga o estado VPS (cenário limpo), como o roteiro original.
+  Destrutivo: a rota só libera para Admin.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import engine, operators, recon, store, tagid
+from . import pcp, phases, engine, operators, recon, store, tagid
 
 _SEG = "PANEL"
 
@@ -18,9 +29,15 @@ def _id(et: str, key: str) -> str:
     return tagid.build(_SEG, et, key)
 
 
-def run() -> dict[str, Any]:
-    store.reset()
-    recon.clear()
+def run(reset: bool = False, actor: str = "Admin") -> dict[str, Any]:
+    import uuid
+    run_id = "e2e_" + uuid.uuid4().hex[:8]
+    # Sufixo nas chaves naturais: rodadas convivem entre si e com dados reais.
+    suf = "" if reset else "-R" + run_id[-4:].upper()
+
+    if reset:
+        store.reset()
+        recon.clear()
     operators.seed()
     store.upsert_resource({"resource_key": "res_cel-mont-01", "name": "CEL-MONT-01", "capacity": 1, "calendar": "T1"})
     operators.identify("ALMOX-02", operator_id="u123")
@@ -29,9 +46,11 @@ def run() -> dict[str, Any]:
     def ts(h: float) -> str:
         return (base + timedelta(hours=h)).isoformat()
 
-    SO, PROJ, OP = _id("SO", "PV-2026-7781"), _id("PROJ", "PRJ-2026-118"), _id("OP", "OP-2026-04412")
-    PICK, ITEM, PO = _id("PICK", "PK-04412-01"), _id("ITEM", "RES-22K"), _id("PO", "PO-2026-5512")
-    OCC, MEAS, SHIP, INV = _id("OCC", "OC-04412-7"), _id("MEAS", "MD-04412"), _id("SHIP", "SH-04412"), _id("INV", "NF-2026-3321")
+    OP_KEY = f"OP-2026-04412{suf}"
+    SO, PROJ, OP = _id("SO", f"PV-2026-7781{suf}"), _id("PROJ", f"PRJ-2026-118{suf}"), _id("OP", OP_KEY)
+    PICK, ITEM, PO = _id("PICK", f"PK-04412-01{suf}"), _id("ITEM", f"RES-22K{suf}"), _id("PO", f"PO-2026-5512{suf}")
+    OCC, MEAS, SHIP, INV = (_id("OCC", f"OC-04412-7{suf}"), _id("MEAS", f"MD-04412{suf}"),
+                            _id("SHIP", f"SH-04412{suf}"), _id("INV", f"NF-2026-3321{suf}"))
 
     steps: list[dict[str, Any]] = []
     st: dict[str, Any] = {"pending_id": None, "occ_id": None}
@@ -42,6 +61,24 @@ def run() -> dict[str, Any]:
 
     def rec(cat: str, txt: str, ok: bool, detail: str = "", **meta) -> None:
         steps.append({"seq": len(steps) + 1, "cat": cat, "txt": txt, "ok": ok, "detail": detail, **meta})
+        # Cada passo do teste e um evento auditavel: quem rodou, qual rodada,
+        # passou ou nao. E o que torna o "modulo teste" parte do sistema real.
+        try:
+            from .. import audit
+            audit.record("E2E", f"E2E_{cat.upper()}", severity="ok" if ok else "warn", actor=actor,
+                         entity_type="e2e_run", entity_id=run_id, correlation_id=run_id,
+                         summary=f"[{len(steps)}] {txt}"[:200],
+                         payload={"ok": ok, "detail": detail, "tag": meta.get("id"), "reset": reset})
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        from .. import audit
+        audit.record("E2E", "E2E_STARTED", actor=actor, entity_type="e2e_run", entity_id=run_id,
+                     correlation_id=run_id, summary=f"teste ponta a ponta iniciado ({'reset' if reset else 'lado a lado'})",
+                     payload={"reset": reset, "op": OP_KEY})
+    except Exception:  # noqa: BLE001
+        pass
 
     # 0 — Cadastros
     rec("cadastro", "Cadastros: operador u123 · estação ALMOX-02 · item RES-22K · cliente COOP-DEMO · template PANEL_ETO_V1 (SCD2)",
@@ -66,7 +103,17 @@ def run() -> dict[str, Any]:
     cap(PICK, "PICK_REQUESTED", 4, parent_tag_id=OP)
     rec("evento", "PICK_REQUESTED — separação solicitada · vínculo OP → PICK",
         ok=any(p["parent_tag_id"] == OP for p in store.parents_of(PICK)), id=PICK, node="pick", pill=["proc", "PICKING"])
-    cap(OP, "DRAWINGS_APPROVED", 5); cap(OP, "SUPPLY_LINKED", 6)   # avança OP até PICKING
+    cap(OP, "DRAWINGS_APPROVED", 5); cap(OP, "SUPPLY_LINKED", 6)   # avança OP até o PCP
+
+    # 4b — PCP: a estrutura do produto vira demanda de separação; a fase libera
+    # por STRUCTURE_RELEASED e a OP segue para PICKING. Sem este passo a OP
+    # pularia o PCP e a etapa ficaria SKIPPED na linha do tempo.
+    pcp.seed(); pcp.clear(OP)
+    r_pcp = pcp.structure(OP, 1, "u123") or {}
+    rec("evento", "STRUCTURE_RELEASED — PCP explode a estrutura em demandas de separação · OP → PICKING",
+        ok=bool(r_pcp.get("ok")) and store.get_tag(OP)["current_phase"] == "PICKING",
+        detail=f"{len(r_pcp.get('demands', []))} itens · fase {store.get_tag(OP)['current_phase']}",
+        id=OP, node="op", pill=["proc", "PCP"])
 
     # 5 — Conferência por visão: 11/12 (ITEM, PICK→ITEM)
     cap(ITEM, "PICK_ITEM_CONFIRMED", 7, parent_tag_id=PICK, vision_mode="CONTAR", confidence=0.93, payload={"total": 11, "alvo": 12})
@@ -126,9 +173,9 @@ def run() -> dict[str, Any]:
         ok=any(c["child_tag_id"] == MEAS for c in store.children_of(OP)), id=MEAS, node="meas", pill=["ok", "APPROVED"])
 
     # 14 — Reconciliação → MATCHED
-    recon.load_docs([{"natural_key": "OP-2026-04412", "doc": "ERP-OP-77120", "qty": 12, "value": 18450.0, "source": "e2e"}])
+    recon.load_docs([{"natural_key": OP_KEY, "doc": f"ERP-OP-77120{suf}", "qty": 12, "value": 18450.0, "source": "e2e"}])
     rc = recon.reconcile()
-    op_matched = any(i["natural_key"] == "OP-2026-04412" and i["status"] == "MATCHED" for i in rc["items"])
+    op_matched = any(i["natural_key"] == OP_KEY and i["status"] == "MATCHED" for i in rc["items"])
     rec("reconc", "Reconciliação físico × ERP/MES → recon_status = MATCHED", ok=op_matched, detail=f"taxa {rc['rate']}%")
 
     # 15 — Fechamento governado (exige MATCHED)
@@ -160,13 +207,49 @@ def run() -> dict[str, Any]:
     rec("fim", "ARCHIVED — instância concluída, reconciliada e 100% auditável",
         ok=store.get_tag(OP)["state"] == "ARCHIVED", op="ARCHIVED", node="op", pill=["ok", "ARCHIVED"])
 
+    # 20 — Linha do tempo por etapa: baseline preservado, realizado gravado no avanço
+    pl = phases.rows(OP)
+    feitas = [p for p in pl if p["state"] == "DONE" and p["actual_start"] and p["actual_end"]]
+    com_base = all(p["baseline_start"] and p["baseline_end"] for p in pl)
+    rec("fases", "Planejado × realizado por etapa — baseline da abertura preservado, início/fim reais gravados no avanço",
+        ok=len(pl) >= 5 and len(feitas) >= 4 and com_base,
+        detail=f"{len(feitas)}/{len(pl)} etapas com realizado · variância medida contra o plano",
+        id=OP, node="op", pill=["ok", f"{len(feitas)} etapas"])
+
+    # ── linhagem: estado final de cada vínculo formado nesta rodada ──
+    # O teste provava os vínculos por contagem. Agora ele LISTA cada aresta com
+    # o estado das duas pontas e registra na trilha — é o que transforma o teste
+    # em evidência de rastreabilidade, e não só num "passou".
+    tags_rodada = [SO, PROJ, OP, PICK, ITEM, PO, OCC, MEAS, SHIP, INV]
+    vinculos: list[dict[str, Any]] = []
+    for pai in tags_rodada:
+        for c in store.children_of(pai):
+            filho = c["child_tag_id"]
+            if filho not in tags_rodada:
+                continue
+            tp, tf = store.get_tag(pai) or {}, store.get_tag(filho) or {}
+            vinculos.append({
+                "relacao": c.get("relation"), "pai": pai, "filho": filho,
+                "pai_estado": tp.get("state"), "pai_fase": tp.get("current_phase"),
+                "filho_estado": tf.get("state"), "filho_fase": tf.get("current_phase"),
+            })
+    try:
+        from .. import audit
+        for v in vinculos:
+            audit.record("E2E", "E2E_LINEAGE", actor=actor, entity_type="lineage", entity_id=v["filho"],
+                         correlation_id=run_id,
+                         summary=f"{v['relacao']}: {v['pai']} [{v['pai_estado']}] → {v['filho']} [{v['filho_estado']}]"[:200],
+                         payload=v)
+    except Exception:  # noqa: BLE001
+        pass
+
     # ── verificação dos critérios de aceite ──
     th = engine.thread(OP)
     links = {"SO→PROJ", "PROJ→OP", "OP→PICK", "PICK→ITEM", "ITEM⇄PO", "OP→OCC", "OP→MEAS", "OP→SHIP", "SHIP→INV"}
     accept = {
         "master_data": len(operators.list_operators()) >= 1,
         "genese": store.get_tag(OP)["state"] in ("IN_PROCESS", "COMPLETED", "ARCHIVED"),
-        "lineage_9": _count_links() >= 9,
+        "lineage_9": _count_links_run([SO, PROJ, OP, PICK, ITEM, PO, OCC, MEAS, SHIP, INV]) >= 9,
         "pending_blocked_cleared": st["pending_id"] is not None,
         "compensation": has_comp,
         "occurrence": st["occ_id"] is not None,
@@ -182,12 +265,43 @@ def run() -> dict[str, Any]:
         "reconciliacao": f"{rc['rate']}% MATCHED",
         "otif": "no prazo",
         "gargalo": th["kpis"]["bottleneck"] or "PICKING",
-        "vinculos": f"{_count_links()} / 9",
+        "vinculos": f"{_count_links_run([SO, PROJ, OP, PICK, ITEM, PO, OCC, MEAS, SHIP, INV])} / 9",
     }
+    passed = all(accept.values())
+    try:
+        from .. import audit
+        audit.record("E2E", "E2E_FINISHED", severity="ok" if passed else "warn", actor=actor,
+                     entity_type="e2e_run", entity_id=run_id, correlation_id=run_id,
+                     summary=f"teste ponta a ponta {'APROVADO' if passed else 'REPROVADO'} · {sum(1 for s in steps if s['ok'])}/{len(steps)} passos",
+                     payload={"acceptance": accept, "kpis": kpis, "reset": reset})
+    except Exception:  # noqa: BLE001
+        pass
+    # Mudanças que ESTA rodada provocou no banco (PostgreSQL): a prova de que
+    # o teste mexeu no sistema real, com autor e campo a campo.
+    mudancas: list[dict[str, Any]] = []
+    try:
+        from .. import changes
+        if changes.disponivel():
+            todas = changes.listar(limit=400).get("changes", [])
+            alvo = set(tags_rodada)
+            mudancas = [c for c in todas if c.get("pk") in alvo][:120]
+    except Exception:  # noqa: BLE001
+        pass
+
     return {"steps": steps, "op_tag": OP, "thread": th, "acceptance": accept, "kpis": kpis,
-            "passed": all(accept.values()), "expected_links": sorted(links)}
+            "passed": passed, "expected_links": sorted(links), "run_id": run_id, "reset": reset,
+            "lineage": vinculos, "changes": mudancas}
 
 
 def _count_links() -> int:
     rows = store.get_connection().execute("SELECT COUNT(*) c FROM vps_lineage").fetchone()
+    return int(dict(rows)["c"]) if rows else 0
+
+
+def _count_links_run(tags: list[str]) -> int:
+    """Vinculos SO desta rodada. O total geral contaria rodadas anteriores e dados reais."""
+    q = ",".join("?" * len(tags))
+    rows = store.get_connection().execute(
+        f"SELECT COUNT(*) c FROM vps_lineage WHERE parent_tag_id IN ({q}) AND child_tag_id IN ({q})",
+        tags + tags).fetchone()
     return int(dict(rows)["c"]) if rows else 0

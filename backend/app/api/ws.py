@@ -139,10 +139,25 @@ async def stream(ws: WebSocket) -> None:
                 )
                 result = await orch.process(ctx, task)
                 frame_ref = _save_frame_if_enabled(data)
-                # Persistência fora do event loop (sqlite síncrono).
-                await asyncio.to_thread(repository.save_inference, result, frame_ref)
-                # Gravação automática por detecção (pessoa/cachorro etc.).
-                await asyncio.to_thread(recording.maybe_capture, result, data)
+                # Persistência fora do event loop (o driver é síncrono).
+                #
+                # GRAVAR É SEPARADO DE VER. Antes estas duas chamadas estavam no
+                # mesmo try do frame: um erro de banco descartava uma inferência
+                # que tinha dado certo, e o operador recebia "erro" olhando para
+                # uma cena que o modelo tinha lido em 200 ms. O resultado vai
+                # para a tela de qualquer jeito; a falha de gravação vira aviso
+                # no resultado e linha no log, que é onde ela deve ser vista.
+                try:
+                    await asyncio.to_thread(repository.save_inference, result, frame_ref)
+                except Exception:  # noqa: BLE001
+                    log.exception("falha ao gravar a inferência")
+                    result.warnings.append("persistencia_falhou")
+                try:
+                    # Gravação automática por detecção (pessoa/cachorro etc.).
+                    await asyncio.to_thread(recording.maybe_capture, result, data)
+                except Exception:  # noqa: BLE001
+                    log.exception("falha na gravação automática")
+                    result.warnings.append("gravacao_automatica_falhou")
                 metrics.add(result.latency_ms)
                 await ws.send_json(dump(ResultMessage(result=result)))
 

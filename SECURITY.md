@@ -18,7 +18,8 @@ Confirmamos o recebimento assim que possível, mantemos você informado sobre a 
 Autenticação (PIN, crachá, FaceID), RBAC do VPS, guarda por API key, WebSocket de frames, descoberta e credenciais de câmeras, integração OT (deve permanecer somente leitura), trilha de auditoria encadeada, biometria e tratamento de imagens (LGPD).
 
 ## Avisos para quem implanta
-- O papel padrão de desenvolvimento é `Admin` (`VISIONDESK_VPS_DEFAULT_ROLE`): troque antes de expor o sistema e defina `VISIONDESK_API_KEY`.
+- A API exige sessão em todas as rotas (exceto login, `/api/health`, `/api/auth/state` e `/api/capabilities`). Antes de expor o sistema: `VISIONDESK_DEV_LOGIN=false`, não defina `VISIONDESK_EXPOSE_DOCS` e restrinja `VISIONDESK_CORS_ORIGINS` à origem do frontend.
+- Qualquer rota nova que precise ficar pública tem de entrar em `PUBLIC` (`backend/app/api/guard.py`) — o teste `test_auth_gate_todas_rotas.py` falha se uma rota responder sem sessão.
 - `ops/mosquitto.conf` (broker anônimo) e `ops/mediamtx.yml` (API aberta) são só para desenvolvimento.
 - Senhas do `docker-compose.yml` são de desenvolvimento — use segredos próprios em produção.
 

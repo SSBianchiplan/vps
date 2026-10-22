@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from ..inference.edge.detector import yolo_detector
 from ..inference.edge.ocr import edge_ocr
 from ..inference.vlm.claude_client import claude_vlm
+from ..inference.errors import VLMUnavailableError
 from ..pipelines.analyze_pipeline import AnalyzePipeline
 from ..pipelines.base import FrameContext, Pipeline
 from ..pipelines.count_pipeline import CountPipeline
@@ -18,6 +19,7 @@ from ..pipelines.detect_pipeline import DetectPipeline
 from ..pipelines.track_pipeline import TrackPipeline
 from ..pipelines.describe_pipeline import DescribePipeline
 from ..pipelines.read_pipeline import ReadPipeline
+from ..logging_conf import get_logger
 from ..schemas.enums import Mode, PipelineKind
 from ..schemas.results import InferenceResult
 from ..schemas.tasks import (
@@ -27,6 +29,9 @@ from ..schemas.tasks import (
     ReadParams,
     TaskConfig,
 )
+
+
+log = get_logger("visiondesk.orchestrator")
 
 
 @dataclass(frozen=True)
@@ -151,7 +156,29 @@ class Orchestrator:
             continuous=continuous,
         )
 
+    # Modos que sabem trabalhar sem token: têm caminho edge (YOLO) próprio.
+    _TEM_EDGE = (Mode.DESCREVER, Mode.ANALISAR, Mode.DETECTAR, Mode.CONTAR, Mode.RASTREAR)
+
     async def process(self, ctx: FrameContext, task: TaskConfig) -> InferenceResult:
         decision = self.decide(task, continuous=ctx.continuous)
         pipeline = self._get_pipeline(task, decision)
-        return await pipeline.run(ctx, task)
+        try:
+            return await pipeline.run(ctx, task)
+        except VLMUnavailableError:
+            # DISPONÍVEL NÃO É O MESMO QUE FUNCIONANDO.
+            #
+            # `decide` pergunta se o VLM está CONFIGURADO. Uma chave sem saldo
+            # responde que sim, e o modo ficava parado no 400 da API mesmo
+            # havendo caminho local pronto — foi o que aconteceu com DESCREVER e
+            # ANALISAR aqui: os dois rodam em YOLO sem token, e nenhum dos dois
+            # era tentado. Só a primeira chamada paga o erro; a partir daí o
+            # pipeline edge fica no cache sob a mesma chave.
+            if decision.use_edge or task.mode not in self._TEM_EDGE:
+                raise
+            if not self.capabilities()["edge_detector"]:
+                raise
+            local = RouteDecision(mode=task.mode, use_edge=True, kind=PipelineKind.EDGE)
+            log.warning("VLM indisponível em %s — caindo para o motor local", task.mode.value)
+            resultado = await self._get_pipeline(task, local).run(ctx, task)
+            resultado.warnings.append("vlm_indisponivel_usou_edge")
+            return resultado

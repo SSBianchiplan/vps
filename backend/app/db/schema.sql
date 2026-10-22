@@ -269,6 +269,7 @@ CREATE TABLE IF NOT EXISTS vps_access (
     role        TEXT NOT NULL DEFAULT 'view',   -- admin | operador | view
     pin_hash    TEXT,                            -- fallback não-biométrico (sha256)
     active      INTEGER NOT NULL DEFAULT 1,
+    perfil      TEXT,                            -- perfil operacional (Operations|Supply|Quality|Projects)
     created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS auth_session (
@@ -532,6 +533,72 @@ CREATE TABLE IF NOT EXISTS vps_baseline_card (
 
 -- Configurações de sistema persistidas (chave→JSON): catálogo UI/UX, schema de
 -- campos de links do supervisório, aparência sincronizada, ondas de implantação.
+-- ── Linha do tempo por ETAPA: baseline, plano vigente e realizado ───
+-- Uma linha por (instância, fase). baseline_* é escrito na gênese e nunca
+-- reescrito; planned_* é reprojetado quando uma etapa atrasa; actual_* é
+-- gravado no instante em que o card avançou. Ver vps/phases.py.
+CREATE TABLE IF NOT EXISTS vps_phase_log (
+    phase_log_id   TEXT PRIMARY KEY,
+    tag_id         TEXT NOT NULL,
+    phase          TEXT NOT NULL,
+    seq            INTEGER NOT NULL,
+    baseline_start TEXT,
+    baseline_end   TEXT,
+    planned_start  TEXT,
+    planned_end    TEXT,
+    actual_start   TEXT,
+    actual_end     TEXT,
+    duration_h     REAL,
+    sla_h          REAL,
+    variance_h     REAL,
+    state          TEXT NOT NULL DEFAULT 'PENDING',   -- PENDING|ACTIVE|DONE|SKIPPED
+    entered_event  TEXT,
+    exited_event   TEXT,
+    updated_at     TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_phase_log_tag_phase ON vps_phase_log(tag_id, phase);
+CREATE INDEX IF NOT EXISTS ix_phase_log_state ON vps_phase_log(state, planned_end);
+
+-- ── PCP — Planejamento e Controle da Produção ───────────────────────
+-- A fase PCP transforma DEMANDA em MATERIAL: pega a estrutura do produto
+-- (vps_bom) e explode em demandas de separação (vps_pick_demand), que é o que
+-- o PICKING vai buscar. Sem esta etapa o picking nascia do nada — alguém
+-- decidia de cabeça o que separar, e a diferença entre o planejado e o
+-- separado não tinha onde ser medida.
+CREATE TABLE IF NOT EXISTS vps_bom (
+    bom_id       TEXT PRIMARY KEY,
+    product_key  TEXT NOT NULL,                 -- família/produto: PANEL, FOOD, PHARMA…
+    template_id  TEXT,                          -- template do processo a que se aplica
+    item_key     TEXT NOT NULL,                 -- RES-22K
+    descricao    TEXT,
+    qty          REAL NOT NULL DEFAULT 1,       -- por unidade do produto
+    unit         TEXT DEFAULT 'un',
+    posicao      INTEGER DEFAULT 0,             -- ordem na estrutura
+    lead_time_h  REAL DEFAULT 0,                -- ressuprimento (entra no CTP)
+    critico      INTEGER DEFAULT 0,             -- falta trava a produção
+    created_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_bom_produto ON vps_bom(product_key, posicao);
+CREATE INDEX IF NOT EXISTS ix_bom_item ON vps_bom(item_key);
+
+CREATE TABLE IF NOT EXISTS vps_pick_demand (
+    demand_id    TEXT PRIMARY KEY,
+    tag_id       TEXT NOT NULL,                 -- OP que demandou (Fio Dourado)
+    pick_tag_id  TEXT,                          -- Tag-ID da separação (filho da OP)
+    bom_id       TEXT,                          -- item da estrutura que gerou
+    item_key     TEXT NOT NULL,
+    descricao    TEXT,
+    qty_planned  REAL NOT NULL,
+    qty_picked   REAL DEFAULT 0,
+    unit         TEXT DEFAULT 'un',
+    state        TEXT NOT NULL DEFAULT 'PLANNED',  -- PLANNED|PICKING|DONE|SHORT
+    critico      INTEGER DEFAULT 0,
+    created_at   TEXT,
+    closed_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_demand_tag ON vps_pick_demand(tag_id, state);
+CREATE INDEX IF NOT EXISTS ix_demand_item ON vps_pick_demand(item_key);
+
 CREATE TABLE IF NOT EXISTS app_config (
     key        TEXT PRIMARY KEY,
     json       TEXT NOT NULL,

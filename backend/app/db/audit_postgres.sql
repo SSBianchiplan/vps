@@ -24,6 +24,13 @@ CREATE TABLE IF NOT EXISTS audit.audit_event (
     PRIMARY KEY (event_id, event_ts)
 ) PARTITION BY RANGE (event_ts);
 
+-- `id` para consumidores que usam essa convenção (lakehouse/BI). É coluna
+-- GERADA a partir da chave natural: espelha event_id sem poder divergir dele.
+-- Sem ela, uma carga que valida "id não nulo" falha com
+-- `column "id" does not exist` — foi o que aconteceu na carga 123 do
+-- pipe:visiondesk_eventos. `event_seq` já servia de marca d'água.
+ALTER TABLE audit.audit_event ADD COLUMN IF NOT EXISTS id text GENERATED ALWAYS AS (event_id) STORED;
+
 -- Partições mensais (cobertura corrente) + default (catch-all).
 CREATE TABLE IF NOT EXISTS audit.audit_event_2026m06 PARTITION OF audit.audit_event FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
 CREATE TABLE IF NOT EXISTS audit.audit_event_2026m07 PARTITION OF audit.audit_event FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');

@@ -7,11 +7,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-from ..vps import aps, bridge, e2e, engine, gold, labels, lgpd, modals, operators, pg_import, planning, rbac, recon, scan as vscan, store, tagid, templates
+from ..vps import aps, pcp, phases, bridge, e2e, engine, gold, labels, lgpd, modals, operators, orders, pg_import, planning, rbac, recon, scan as vscan, store, tagid, templates, tree
 
 router = APIRouter(prefix="/vps", tags=["vps"])
 
@@ -92,12 +92,44 @@ def resolve_occurrence(occ_id: str, role: str = Depends(rbac.current_role)) -> d
     return engine.resolve_occurrence(occ_id)
 
 
+def _actor(x_auth_token: str | None = Header(default=None)) -> str:
+    """Quem está agindo: o operador da sessão. Sem sessão, 'cockpit' (dev aberto)."""
+    from ..auth import auth
+    s = auth.session(x_auth_token)
+    return (s or {}).get("operator_id") or "cockpit"
+
+
+class AdvanceIn(BaseModel):
+    reason: str | None = None
+
+
 @router.post("/thread/{tag_id:path}/advance")
-def advance(tag_id: str, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+def advance(tag_id: str, body: AdvanceIn | None = None, role: str = Depends(rbac.current_role),
+            actor: str = Depends(_actor)) -> dict[str, Any]:
     rbac.require(role, tag_id)
-    r = engine.advance(tag_id)
+    r = engine.advance(tag_id, (body or AdvanceIn()).reason, actor)
     if r is None:
         raise HTTPException(status_code=404, detail={"code": "tag_not_found", "message": "Tag-ID não encontrado"})
+    if not r.get("ok"):
+        raise HTTPException(status_code=409, detail={"code": "move_refused", "message": r.get("message")})
+    return r
+
+
+class MoveIn(BaseModel):
+    to_phase: str
+    reason: str
+
+
+@router.post("/thread/{tag_id:path}/move")
+def move(tag_id: str, body: MoveIn, role: str = Depends(rbac.current_role), actor: str = Depends(_actor)) -> dict[str, Any]:
+    """Kanban: mover para uma fase com justificativa obrigatória (adiante, DONE ou retrabalho)."""
+    rbac.require(role, tag_id)
+    r = engine.move(tag_id, body.to_phase, body.reason, actor)
+    if r is None:
+        raise HTTPException(status_code=404, detail={"code": "tag_not_found", "message": "Tag-ID não encontrado"})
+    if not r.get("ok"):
+        raise HTTPException(status_code=409, detail={"code": "move_refused", "message": r.get("message"),
+                                                     "phases": r.get("phases")})
     return r
 
 
@@ -106,9 +138,9 @@ class CorrectIn(BaseModel):
 
 
 @router.post("/thread/{tag_id:path}/correct")
-def correct(tag_id: str, body: CorrectIn, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+def correct(tag_id: str, body: CorrectIn, role: str = Depends(rbac.current_role), actor: str = Depends(_actor)) -> dict[str, Any]:
     rbac.require(role, tag_id)
-    r = engine.correct(tag_id, body.note)
+    r = engine.correct(tag_id, body.note, actor)
     if r is None:
         raise HTTPException(status_code=404, detail={"code": "tag_not_found", "message": "Tag-ID não encontrado"})
     return r
@@ -123,7 +155,20 @@ def roles() -> dict[str, Any]:
 # ── Operadores (master data + identificação na captura) ──────────────
 @router.get("/operators")
 def operators_list(status: str | None = Query(default=None)) -> dict[str, Any]:
-    return {"operators": operators.list_operators(status), "sessions": operators.sessions()}
+    return {"operators": operators.list_operators(status), "sessions": operators.sessions(),
+            "opcoes": operators.opcoes()}
+
+
+@router.get("/planning/tree")
+def planning_tree(segment: str | None = Query(default=None)) -> dict[str, Any]:
+    """Arvore do planejamento: Visual Planning + APS + Fio Dourado, com as bases."""
+    return tree.arvore(segment)
+
+
+@router.get("/operators/options")
+def operators_options() -> dict[str, Any]:
+    """Valores possíveis por coluna — listas segmentadas em vez de texto livre."""
+    return operators.opcoes()
 
 
 class OperatorIn(BaseModel):
@@ -186,7 +231,8 @@ class ResourceIn(BaseModel):
 
 
 @router.post("/aps/resources")
-def aps_resource_upsert(body: ResourceIn) -> dict[str, Any]:
+def aps_resource_upsert(body: ResourceIn, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "APS")
     return store.upsert_resource(body.model_dump(exclude_none=False))
 
 
@@ -196,8 +242,9 @@ def aps_rules() -> dict[str, Any]:
 
 
 @router.post("/aps/schedule")
-def aps_generate(scenario: str = Query(default="base"), rule: str = Query(default="prioridade")) -> dict[str, Any]:
+def aps_generate(scenario: str = Query(default="base"), rule: str = Query(default="prioridade"), role: str = Depends(rbac.current_role)) -> dict[str, Any]:
     """Gera cronograma de capacidade finita (plan); realimenta com actuals da visão."""
+    rbac.require_ctx(role, "APS")
     return aps.generate(scenario, rule)
 
 
@@ -206,8 +253,33 @@ def aps_schedule(scenario: str = Query(default="base")) -> dict[str, Any]:
     return {"scenario": scenario, "scenarios": store.scenarios(), "rows": store.schedule(scenario)}
 
 
+class RescheduleIn(BaseModel):
+    planned_start: str
+    planned_end: str
+    resource_key: str | None = None
+    reason: str
+
+
+@router.post("/aps/schedule/{schedule_id}/move")
+def aps_reschedule(schedule_id: str, body: RescheduleIn, role: str = Depends(rbac.current_role),
+                   actor: str = Depends(_actor)) -> dict[str, Any]:
+    """Arrastar/esticar uma operacao no cronograma (o Gantt e editavel)."""
+    rbac.require_ctx(role, "APS")
+    r = aps.reschedule(schedule_id, body.planned_start, body.planned_end,
+                       body.resource_key, body.reason, actor)
+    if r is None:
+        raise HTTPException(status_code=404, detail={"code": "schedule_not_found",
+                                                     "message": "operacao nao encontrada no cronograma"})
+    if not r.get("ok"):
+        raise HTTPException(status_code=409, detail={"code": "reschedule_refused",
+                                                     "message": r.get("message"),
+                                                     "resources": r.get("resources")})
+    return r
+
+
 @router.post("/aps/publish")
-def aps_publish(scenario: str = Query(default="base")) -> dict[str, Any]:
+def aps_publish(scenario: str = Query(default="base"), role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "APS")
     return aps.publish(scenario)
 
 
@@ -232,14 +304,16 @@ class CtpIn(BaseModel):
 
 
 @router.post("/aps/ctp")
-def aps_ctp(body: CtpIn) -> dict[str, Any]:
+def aps_ctp(body: CtpIn, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "APS")
     return aps.ctp(body.qty, body.due)
 
 
 @router.post("/aps/expedite")
 def aps_expedite(tag_id: str = Query(...), scenario: str = Query(default="base"),
-                 rule: str = Query(default="prioridade")) -> dict[str, Any]:
+                 rule: str = Query(default="prioridade"), role: str = Depends(rbac.current_role)) -> dict[str, Any]:
     """Prioriza a OP (expedite) e replaneja."""
+    rbac.require_ctx(role, "APS")
     aps.expedite(tag_id)
     return aps.generate(scenario, rule)
 
@@ -251,6 +325,117 @@ def lgpd_status() -> dict[str, Any]:
 
 class LgpdIn(BaseModel):
     blur: bool
+
+
+# ── Linha do tempo por etapa ─────────────────────────────────────────
+@router.get("/phases/{tag_id:path}")
+def phases_of(tag_id: str) -> dict[str, Any]:
+    return {"tag_id": tag_id, "rows": phases.rows(tag_id), "resumo": phases.resumo(tag_id)}
+
+
+@router.get("/phases-kpis")
+def phases_kpis() -> dict[str, Any]:
+    return phases.kpis()
+
+
+@router.post("/phases/backfill")
+def phases_backfill(role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    """Reconstroi o historico de fases das instancias anteriores a tabela."""
+    rbac.require_ctx(role, "APS")
+    return phases.backfill()
+
+
+# ── PCP — Planejamento e Controle da Producao ────────────────────────
+# A etapa que transforma demanda em material: estrutura do produto (BOM) ->
+# demandas de separacao -> o PICKING tem o que buscar.
+
+
+@router.get("/pcp/bom")
+def pcp_bom(product_key: str | None = Query(default=None)) -> dict[str, Any]:
+    return {"produtos": pcp.produtos(), "itens": pcp.bom(product_key)}
+
+
+class BomItemIn(BaseModel):
+    bom_id: str | None = None
+    product_key: str
+    item_key: str
+    descricao: str | None = None
+    qty: float = 1
+    unit: str = "un"
+    posicao: int = 0
+    lead_time_h: float = 0
+    critico: bool = False
+
+
+@router.post("/pcp/bom")
+def pcp_bom_upsert(body: BomItemIn, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PCP")
+    try:
+        return pcp.upsert_item(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"code": "bom_invalido", "message": str(e)}) from e
+
+
+@router.delete("/pcp/bom/{bom_id}")
+def pcp_bom_delete(bom_id: str, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PCP")
+    if not pcp.delete_item(bom_id):
+        raise HTTPException(status_code=404, detail={"code": "bom_not_found", "message": "item nao encontrado"})
+    return {"ok": True}
+
+
+@router.post("/pcp/bom/seed")
+def pcp_bom_seed(role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PCP")
+    return pcp.seed()
+
+
+@router.get("/pcp/queue")
+def pcp_queue() -> dict[str, Any]:
+    return {"fila": pcp.fila(), "kpis": pcp.kpis()}
+
+
+@router.get("/pcp/demands/{tag_id:path}")
+def pcp_demands(tag_id: str) -> dict[str, Any]:
+    return {"tag_id": tag_id, "demands": pcp.demands(tag_id)}
+
+
+class StructureIn(BaseModel):
+    qty: float = 1
+
+
+@router.post("/pcp/structure/{tag_id:path}")
+def pcp_structure(tag_id: str, body: StructureIn | None = None, role: str = Depends(rbac.current_role),
+                  actor: str = Depends(_actor)) -> dict[str, Any]:
+    """Estruturacao do produto: explode a BOM em demandas de separacao."""
+    rbac.require_ctx(role, "PCP")
+    r = pcp.structure(tag_id, (body or StructureIn()).qty, actor)
+    if r is None:
+        raise HTTPException(status_code=404, detail={"code": "tag_not_found", "message": "Tag-ID nao encontrado"})
+    if not r.get("ok"):
+        raise HTTPException(status_code=409, detail={"code": "structure_refused", "message": r.get("message")})
+    return r
+
+
+@router.post("/pcp/clear/{tag_id:path}")
+def pcp_clear(tag_id: str, role: str = Depends(rbac.current_role), actor: str = Depends(_actor)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PCP")
+    return pcp.clear(tag_id, actor)
+
+
+class DemandIn(BaseModel):
+    qty_picked: float
+
+
+@router.post("/pcp/demand/{demand_id}")
+def pcp_demand_set(demand_id: str, body: DemandIn, role: str = Depends(rbac.current_role),
+                   actor: str = Depends(_actor)) -> dict[str, Any]:
+    """Confirma a separacao de um item (o PICKING responde ao que o PCP pediu)."""
+    rbac.require_ctx(role, "STATION")
+    r = pcp.set_demand(demand_id, body.qty_picked, actor)
+    if r is None:
+        raise HTTPException(status_code=404, detail={"code": "demand_not_found", "message": "demanda nao encontrada"})
+    return r
 
 
 @router.post("/lgpd")
@@ -370,9 +555,17 @@ def seed(reset: bool = Query(default=True)) -> dict[str, Any]:
 
 
 @router.post("/e2e/run")
-def e2e_run() -> dict[str, Any]:
-    """Executa o teste ponta a ponta REAL (cadastro→DONE) e devolve os passos."""
-    return e2e.run()
+def e2e_run(reset: bool = Query(default=False), role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    """Executa o teste ponta a ponta REAL (cadastro→DONE) e devolve os passos.
+
+    reset=false (padrao): roda AO LADO dos dados existentes, com chaves proprias
+    da rodada, e grava cada passo na trilha de auditoria. reset=true apaga o
+    estado VPS antes de rodar — so Admin, porque destroi dados de operacao.
+    """
+    if reset and role != "Admin":
+        raise HTTPException(status_code=403, detail={"code": "rbac_denied",
+                            "message": "reset do estado VPS e exclusivo de Admin"})
+    return e2e.run(reset=reset, actor=role)
 
 
 # ── Planejamento (Projetos/Cards) — VPS_Projetos_Planejamento_Cards.md ──
@@ -388,13 +581,87 @@ class ProjectIn(BaseModel):
     owner: str | None = None
 
 
+# ── ORDENS DE PRODUÇÃO ───────────────────────────────────────────────
+class OpIn(BaseModel):
+    code: str | None = None
+    segment: str | None = None
+    project_id: str | None = None
+    product_key: str | None = None
+    qty: float = 1
+    title: str | None = None
+    planned_start: str | None = None
+    planned_end: str | None = None
+    planned_effort: float | None = None
+    resource_key: str | None = None
+    instance: str | None = None
+    owner: str | None = None
+
+
+class OpLoteIn(BaseModel):
+    itens: list[OpIn]
+    comuns: OpIn | None = None
+
+
+@router.get("/op/proximo-codigo")
+def op_proximo(segment: str = "GENERIC") -> dict[str, Any]:
+    """Sugestão de número para a tela de abertura — sugestão, não reserva."""
+    return {"code": orders.proximo_codigo(segment)}
+
+
+@router.get("/op/do-projeto/{project_id}")
+def op_do_projeto(project_id: str, arquivadas: bool = False) -> dict[str, Any]:
+    return {"ordens": orders.do_projeto(project_id, incluir_arquivadas=arquivadas)}
+
+
+@router.post("/op")
+def op_abrir(body: OpIn, role: str = Depends(rbac.current_role),
+             actor: str = Depends(_actor)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PLANNING")
+    d = body.model_dump(exclude_none=True)
+    d["code"] = d.get("code") or orders.proximo_codigo(d.get("segment") or "GENERIC")
+    r = orders.abrir({**d, "actor": actor})
+    if not r.get("ok"):
+        raise HTTPException(status_code=409, detail={"code": "op_nao_aberta", "message": r.get("message")})
+    return r
+
+
+@router.post("/op/lote")
+def op_abrir_lote(body: OpLoteIn, role: str = Depends(rbac.current_role),
+                  actor: str = Depends(_actor)) -> dict[str, Any]:
+    """Abre as OPs do assistente numa passada — o que falhar volta identificado."""
+    rbac.require_ctx(role, "PLANNING")
+    comuns = {**(body.comuns.model_dump(exclude_none=True) if body.comuns else {}), "actor": actor}
+    return orders.abrir_lote([i.model_dump(exclude_none=True) for i in body.itens], comuns)
+
+
+# ── ETAPAS: planejar a janela à mão ──────────────────────────────────
+class JanelaIn(BaseModel):
+    phase: str
+    planned_start: str | None = None
+    planned_end: str | None = None
+    cascata: bool = True
+
+
+@router.post("/phases/{tag_id:path}/janela")
+def phase_janela(tag_id: str, body: JanelaIn, role: str = Depends(rbac.current_role),
+                 actor: str = Depends(_actor)) -> dict[str, Any]:
+    """Replaneja a janela VIGENTE de uma etapa. O baseline não se toca."""
+    rbac.require(role, tag_id)
+    r = phases.set_window(tag_id, body.phase, body.planned_start, body.planned_end,
+                          actor=actor, cascata=body.cascata)
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail={"code": "janela_invalida", "message": r.get("message")})
+    return r
+
+
 @router.get("/projects")
 def projects_list() -> dict[str, Any]:
     return {"projects": planning.list_projects()}
 
 
 @router.post("/projects")
-def project_create(body: ProjectIn) -> dict[str, Any]:
+def project_create(body: ProjectIn, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PLANNING")
     return planning.create_project(body.model_dump(exclude_none=False))
 
 
@@ -417,7 +684,8 @@ class WbsIn(BaseModel):
 
 
 @router.post("/project/{project_id}/wbs")
-def project_wbs(project_id: str, body: WbsIn) -> dict[str, Any]:
+def project_wbs(project_id: str, body: WbsIn, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PLANNING")
     return planning.add_wbs(project_id, body.code, body.name, body.parent, body.lvl)
 
 
@@ -433,7 +701,8 @@ class CardIn(BaseModel):
 
 
 @router.post("/project/{project_id}/card")
-def project_card(project_id: str, body: CardIn) -> dict[str, Any]:
+def project_card(project_id: str, body: CardIn, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PLANNING")
     return planning.add_card(project_id, body.model_dump(exclude_none=False))
 
 
@@ -445,7 +714,8 @@ class DepIn(BaseModel):
 
 
 @router.post("/project/{project_id}/dependency")
-def project_dep(project_id: str, body: DepIn) -> dict[str, Any]:
+def project_dep(project_id: str, body: DepIn, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PLANNING")
     r = planning.add_dependency(project_id, body.pred_card_id, body.succ_card_id, body.dep_type, body.lag_min)
     if r is None:
         raise HTTPException(status_code=400, detail={"code": "invalid_dep", "message": "dependência inválida"})
@@ -453,7 +723,8 @@ def project_dep(project_id: str, body: DepIn) -> dict[str, Any]:
 
 
 @router.post("/project/{project_id}/schedule")
-def project_schedule(project_id: str) -> dict[str, Any]:
+def project_schedule(project_id: str, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PLANNING")
     return planning.schedule(project_id)
 
 
@@ -463,7 +734,8 @@ def project_cpm(project_id: str) -> dict[str, Any]:
 
 
 @router.post("/project/{project_id}/baseline")
-def project_baseline(project_id: str) -> dict[str, Any]:
+def project_baseline(project_id: str, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PLANNING")
     return planning.set_baseline(project_id)
 
 
@@ -478,23 +750,70 @@ class AssignIn(BaseModel):
 
 
 @router.post("/card/{card_id}/assign")
-def card_assign(card_id: str, body: AssignIn) -> dict[str, Any]:
+def card_assign(card_id: str, body: AssignIn, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PLANNING")
     r = planning.assign_card(card_id, body.operator, body.resource)
     if r is None:
         raise HTTPException(status_code=404, detail={"code": "card_not_found", "message": "card não encontrado"})
     return r
 
 
+class CardWindowIn(BaseModel):
+    planned_start: str
+    planned_end: str
+    reason: str
+
+
+@router.post("/card/{card_id}/window")
+def card_window(card_id: str, body: CardWindowIn, role: str = Depends(rbac.current_role),
+                actor: str = Depends(_actor)) -> dict[str, Any]:
+    """Arrastar/esticar um card no cronograma do projeto."""
+    rbac.require_ctx(role, "PLANNING")
+    r = planning.set_card_window(card_id, body.planned_start, body.planned_end, body.reason, actor)
+    if r is None:
+        raise HTTPException(status_code=404, detail={"code": "card_not_found", "message": "card nao encontrado"})
+    if not r.get("ok"):
+        raise HTTPException(status_code=409, detail={"code": "window_refused", "message": r.get("message")})
+    return r
+
+
+class CardStateIn(BaseModel):
+    state: str
+    reason: str
+
+
+@router.post("/card/{card_id}/state")
+def card_state(card_id: str, body: CardStateIn, role: str = Depends(rbac.current_role),
+               actor: str = Depends(_actor)) -> dict[str, Any]:
+    """Kanban do projeto: trocar a raia do card com justificativa."""
+    rbac.require_ctx(role, "PLANNING")
+    r = planning.set_card_state(card_id, body.state, body.reason, actor)
+    if r is None:
+        raise HTTPException(status_code=404, detail={"code": "card_not_found", "message": "card nao encontrado"})
+    if not r.get("ok"):
+        raise HTTPException(status_code=409, detail={"code": "state_refused", "message": r.get("message")})
+    return r
+
+
 @router.post("/card/{card_id}/release")
-def card_release(card_id: str) -> dict[str, Any]:
+def card_release(card_id: str, role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PLANNING")
     r = planning.release_card(card_id)
     if r is None:
         raise HTTPException(status_code=404, detail={"code": "card_not_found", "message": "card não encontrado"})
     return r
 
 
+@router.post("/planning/seed-gpsis")
+def planning_seed_gpsis(role: str = Depends(rbac.current_role), actor: str = Depends(_actor)) -> dict[str, Any]:
+    """Projeto demonstrativo GPSIS_001_DEMO, persistido (idempotente)."""
+    rbac.require_ctx(role, "PLANNING")
+    return planning.seed_gpsis_demo(actor)
+
+
 @router.post("/planning/seed")
-def planning_seed() -> dict[str, Any]:
+def planning_seed(role: str = Depends(rbac.current_role)) -> dict[str, Any]:
+    rbac.require_ctx(role, "PLANNING")
     return planning.seed_demo()
 
 

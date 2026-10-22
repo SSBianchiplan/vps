@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import store, tagid, templates
+from . import guards
+from . import phases as etapas   # log planejado x realizado por etapa
 
 # máquina de estados §5.3
 STATES = ["CAPTURED", "RESOLVED", "BOUND", "IN_PROCESS", "EXCEPTION", "COMPLETED", "ARCHIVED"]
@@ -119,6 +121,11 @@ def _ensure_tag(tag_id: str, event_ts: str, parent_tag_id: str | None = None) ->
         "closed_ts": None, "last_event_ts": event_ts,
     }
     store.upsert_tag(tag)
+    # O plano da instância nasce com ela: uma linha por fase, com o baseline
+    # contado dos SLAs do template a partir de agora. A primeira fase já entra.
+    etapas.seed(tag)
+    if phases_ids := _phase_ids(tpl):
+        etapas.entrar(tag_id, phases_ids[0], event_ts)
     return tag
 
 
@@ -171,16 +178,29 @@ def capture(ev: dict[str, Any]) -> dict[str, Any]:
         pend.append(store.open_pending(tag_id, phase, f"{action} em {phase}", blocking=True, opened_ts=event_ts))
         new_state = "EXCEPTION"
         new_phase = phase
-    # 3) ação de saída de fase → avança p/ próxima
+    # 3) ação de saída de fase → avança p/ próxima, SE a fase cumpriu o que devia
     elif touched and action in touched.get("exit", []):
-        store.clear_pendings(tag_id, phase)
-        idx = phases.index(phase) if phase in phases else -1
-        cur_idx = phases.index(cur_phase) if cur_phase in phases else -1
-        if idx >= 0 and idx < cur_idx:  # saída fora de ordem (fase anterior)
-            occ.append(store.raise_occurrence(tag_id, phase, "INVALID_TRANSITION", "nok",
-                       f"Saída de {phase} fora de ordem (atual: {cur_phase})", raised_ts=event_ts))
-        new_phase = phases[idx + 1] if 0 <= idx < len(phases) - 1 else phase
-        new_state = "IN_PROCESS"
+        # A ação de saída é uma DECLARAÇÃO ("terminei"); a guarda é a
+        # verificação. Sem ela, uma OP sem estrutura nenhuma atravessava PCP,
+        # separação, montagem e faturamento e fechava como concluída — medido.
+        # Ver vps/guards.py.
+        impedimento = guards.verificar(tag_id, touched.get("requires"))
+        if impedimento:
+            pend.append(store.open_pending(tag_id, phase, impedimento, blocking=True, opened_ts=event_ts))
+            occ.append(store.raise_occurrence(
+                tag_id, phase, "PHASE_PRECONDITION_UNMET", "nok",
+                f"Saída de {phase} recusada: {impedimento}", raised_ts=event_ts))
+            new_state = "EXCEPTION"
+            new_phase = phase
+        else:
+            store.clear_pendings(tag_id, phase)
+            idx = phases.index(phase) if phase in phases else -1
+            cur_idx = phases.index(cur_phase) if cur_phase in phases else -1
+            if idx >= 0 and idx < cur_idx:  # saída fora de ordem (fase anterior)
+                occ.append(store.raise_occurrence(tag_id, phase, "INVALID_TRANSITION", "nok",
+                           f"Saída de {phase} fora de ordem (atual: {cur_phase})", raised_ts=event_ts))
+            new_phase = phases[idx + 1] if 0 <= idx < len(phases) - 1 else phase
+            new_state = "IN_PROCESS"
     # 4) ação de entrada / progresso → fixa fase tocada
     elif touched:
         new_phase = phase
@@ -196,6 +216,14 @@ def capture(ev: dict[str, Any]) -> dict[str, Any]:
     tag.update({"state": new_state, "current_phase": new_phase,
                 "last_event_ts": event_ts, "closed_ts": closed_ts})
     store.upsert_tag(tag)
+
+    # Realizado por etapa, gravado AGORA — não reconstruído depois. É o que
+    # torna "quando entrou / quando saiu / quanto levou" um dado, e não uma
+    # varredura do histórico a cada abertura de tela.
+    if new_phase != cur_phase:
+        etapas.avancar(tag_id, cur_phase, new_phase, event_ts, eid)
+    if new_state == "COMPLETED":
+        etapas.fechar(tag_id, event_ts)
 
     from .. import audit  # trilha unificada: captura VPS é rastreabilidade
     audit.record("VPS", str(action).upper(),
@@ -234,6 +262,8 @@ def thread(tag_id: str) -> dict[str, Any] | None:
         "occurrences": store.occurrences_for(tag_id, open_only=False),
         "kpis": {"lead_time_h": round(lead, 1), "phase_times_h": {k: round(v, 1) for k, v in phase_times.items()},
                  "bottleneck": bottleneck, "events": len(events)},
+        "phase_log": etapas.rows(tag_id),
+        "plano": etapas.resumo(tag_id),
     }
 
 
@@ -259,6 +289,25 @@ def _risk_level(state: str, sla: float | None, aging: float, pendings: int) -> s
 # Ordem canônica das fases (ciclo de vida ponta a ponta, SPEC_VPS §8) — templates
 # percorridos em ordem lógica de fluxo p/ o kanban sair sempre na sequência do processo.
 _CANON_TEMPLATES = ["SO_OTC_V1", "PROJ_V1", "PANEL_ETO_V1", "GENERIC_V1", "FOOD_V1", "PHARMA_V1", "SHIP_V1"]
+
+
+def _phase_entered_ts(tag: dict[str, Any]) -> str | None:
+    """Instante em que a instância ENTROU na fase atual.
+
+    Percorre a linha do tempo de trás para a frente: enquanto os eventos forem da
+    fase atual, ainda estamos "dentro" dela; o primeiro evento de outra fase é a
+    transição — o relógio da fase começa ali. Se todos os eventos são da fase
+    atual, a fase começou na gênese (opened_ts).
+    """
+    cur = tag.get("current_phase")
+    events = store.events_for(tag["tag_id"])
+    entrada = None
+    for e in reversed(events):
+        ph = e.get("phase")
+        if ph and ph != cur:
+            return entrada or e.get("event_ts")
+        entrada = e.get("event_ts")
+    return tag.get("opened_ts") or entrada or tag.get("last_event_ts")
 
 
 def _canonical_phases() -> list[str]:
@@ -301,7 +350,10 @@ def board(segment: str | None = None, entity: str | None = None) -> dict[str, An
         col = "DONE" if done else (t.get("current_phase") or first)
         if col not in wip:
             col = first if first in wip else cols[0]
-        aging = 0.0 if done else _hours_since(t.get("last_event_ts"))
+        # "Tempo na fase" conta desde a ENTRADA na fase. Antes contava desde o
+        # último evento: qualquer registro dentro da mesma fase zerava o relógio
+        # e o SLA parecia cumprido sem a fase ter andado.
+        aging = 0.0 if done else _hours_since(_phase_entered_ts(t))
         phdef = _phase_def(t["template_id"], t.get("current_phase"))
         sla = (phdef or {}).get("sla_hours")
         sla_status = "ok"
@@ -314,8 +366,13 @@ def board(segment: str | None = None, entity: str | None = None) -> dict[str, An
         card = {
             "tag_id": t["tag_id"], "entity_type": t["entity_type"], "natural_key": t["natural_key"],
             "segment": t["segment"], "state": t["state"], "phase": col,
+            "template_id": t.get("template_id"), "phases": _phase_ids(t.get("template_id")),
+            "phase_entered_ts": None if done else _phase_entered_ts(t),
             "aging_h": round(aging, 1), "sla_h": sla, "sla_status": sla_status,
             "eta_breach_h": eta, "risk": risk, "pendings": opc, "occurrences": ooc,
+            "plano": etapas.resumo(t["tag_id"]),
+            "opened_ts": t.get("opened_ts"), "closed_ts": t.get("closed_ts"),
+            "parent_tag_id": t.get("parent_tag_id"),
         }
         cards.append(card)
         wip[col] = wip.get(col, 0) + 1
@@ -359,7 +416,11 @@ def kpis() -> dict[str, Any]:
     cost = sum(_hours_since(p["opened_ts"]) * cph for p in store.all_open_pendings())
     open_pend = sum(store.open_pending_count(t["tag_id"]) for t in tags)
     open_occ = sum(store.open_occurrence_count(t["tag_id"]) for t in tags)
-    matched = sum(1 for e in events if e.get("recon_status") == "MATCHED")
+    # Reconciliação é atributo da INSTÂNCIA (tag × documento ERP), não do evento:
+    # contar eventos MATCHED sobre todos os eventos dava 7% num cockpit em que
+    # a tela de reconciliação mostrava 100% das OPs casadas.
+    tags_recon = {e["tag_id"] for e in events if e.get("recon_status") == "MATCHED"}
+    tags_com_evento = {e["tag_id"] for e in events}
     vision_events = sum(1 for e in events if e.get("vision_mode"))
     return {
         "CLD_Thread_LeadTime_h": round(sum(lead_times) / len(lead_times), 1) if lead_times else None,
@@ -371,7 +432,7 @@ def kpis() -> dict[str, Any]:
         "CLD_Occurrence_Open": open_occ,
         "CLD_Cost_of_Pendencies": round(cost, 2),
         "CLD_Currency": s.vps_currency,
-        "CLD_Reconciliation_Rate": round(100 * matched / len(events), 1) if events else 0.0,
+        "CLD_Reconciliation_Rate": round(100 * len(tags_recon) / len(tags_com_evento), 1) if tags_com_evento else 0.0,
         "CLD_Vision_Coverage": round(100 * vision_events / len(events), 1) if events else 0.0,
         "CLD_Events_Total": len(events),
     }
@@ -407,28 +468,121 @@ def resolve_occurrence(occ_id: str) -> dict[str, Any]:
     return {"ok": store.resolve_occurrence(occ_id)}
 
 
-def advance(tag_id: str) -> dict[str, Any] | None:
-    """Empurra a ação de saída da fase atual (avanço manual pelo cockpit)."""
+def advance(tag_id: str, reason: str | None = None, actor: str | None = None) -> dict[str, Any] | None:
+    """Empurra a ação de saída da fase atual (avanço manual pelo cockpit).
+
+    `reason` é a justificativa do usuário e `actor` quem mandou — os dois vão
+    para o payload do evento e para a trilha. Avanço manual sem autor era
+    "cockpit" para todo mundo: ninguém sabia quem moveu o quê.
+    """
     tag = store.get_tag(tag_id)
     if not tag:
         return None
+    if tag["state"] in DONE_STATES:
+        return {"ok": False, "message": "instância concluída — não avança"}
+    if store.open_pending_count(tag_id) > 0:
+        return {"ok": False, "message": "fase BLOQUEADA por pendência — resolva a pendência antes de avançar"}
     exits = (_phase_def(tag["template_id"], tag.get("current_phase")) or {}).get("exit", [])
     if not exits:
         return {"ok": False, "message": "fase sem ação de saída definida"}
     out = capture({"tag_id": tag_id, "action": exits[0], "event_ts": store.now_iso(),
-                   "source_type": "MANUAL", "operator_id": "cockpit", "payload": {"manual": True}})
+                   "source_type": "MANUAL", "operator_id": actor or "cockpit",
+                   "payload": {"manual": True, "reason": reason, "moved_by": actor}})
     return {"ok": True, **out}
 
 
-def correct(tag_id: str, note: str) -> dict[str, Any] | None:
+def correct(tag_id: str, note: str, actor: str | None = None) -> dict[str, Any] | None:
     """Correção por evento COMPENSATÓRIO (imutabilidade §15) — auditável, não destrói."""
     tag = store.get_tag(tag_id)
     if not tag:
         return None
     eid = store.append_event({"tag_id": tag_id, "action": "COMPENSATION", "phase": tag.get("current_phase"),
                               "domain": "AUDIT", "event_ts": store.now_iso(), "source_type": "MANUAL",
-                              "operator_id": "cockpit", "payload": {"note": note}, "owner": "Quality"})
+                              "operator_id": actor or "cockpit", "payload": {"note": note}, "owner": "Quality"})
+    from .. import audit
+    audit.record("VPS", "COMPENSATION", actor=actor or "cockpit", entity_type="tag", entity_id=tag_id,
+                 correlation_id=tag_id, summary=f"correção compensatória em {tag.get('natural_key')}: {note[:120]}",
+                 payload={"note": note, "phase": tag.get("current_phase")})
     return {"ok": True, "event_id": eid}
+
+
+def move(tag_id: str, to_phase: str, reason: str, actor: str | None = None) -> dict[str, Any] | None:
+    """Move a instância para uma fase do kanban COM JUSTIFICATIVA (arrastar e soltar).
+
+    Três casos, todos auditáveis e nenhum destrutivo:
+      adiante   → dispara a ação de saída de cada fase intermediária, em ordem
+                  (o Event Store fica consistente; pular >1 fase abre uma
+                  ocorrência PHASE_SKIPPED para a qualidade olhar);
+      DONE      → idem até a última fase, cuja saída fecha a instância;
+      para trás → retrabalho: evento REWORK, ocorrência REWORK e a fase atual
+                  volta. O passado não é apagado — a volta é um evento a mais.
+    Bloqueada por pendência → recusa: a pendência precisa ser resolvida no Fio.
+    """
+    tag = store.get_tag(tag_id)
+    if not tag:
+        return None
+    reason = (reason or "").strip()
+    if len(reason) < 5:
+        return {"ok": False, "message": "justificativa obrigatória (mínimo 5 caracteres)"}
+    phases = _phase_ids(tag.get("template_id"))
+    cur = tag.get("current_phase")
+    if tag["state"] in DONE_STATES:
+        return {"ok": False, "message": "instância concluída — reabra com uma correção compensatória, não movendo o card"}
+    if to_phase != "DONE" and to_phase not in phases:
+        # O kanban mostra a UNIÃO das fases de todos os templates em uso, então
+        # existe coluna que não pertence a esta instância. Dizer só "não existe"
+        # deixa o usuário sem saída: a recusa carrega para onde ELA pode ir.
+        return {"ok": False, "phases": phases,
+                "message": (f"'{to_phase}' não é fase do template {tag.get('template_id')} desta instância. "
+                            f"Fases possíveis: {', '.join(phases)} ou DONE.")}
+    if to_phase == cur:
+        return {"ok": False, "message": "a instância já está nesta fase"}
+    if store.open_pending_count(tag_id) > 0:
+        return {"ok": False, "message": "fase BLOQUEADA por pendência — resolva a pendência no Fio antes de mover"}
+
+    actor = actor or "cockpit"
+    cur_idx = phases.index(cur) if cur in phases else 0
+    to_idx = len(phases) if to_phase == "DONE" else phases.index(to_phase)
+    payload = {"manual": True, "reason": reason, "moved_by": actor, "from": cur, "to": to_phase, "via": "kanban"}
+    fired: list[str] = []
+    occ: list[str] = []
+
+    if to_idx > cur_idx:
+        # adiante: saída de cada fase entre a atual e o destino
+        for i in range(cur_idx, to_idx):
+            exits = (_phase_def(tag["template_id"], phases[i]) or {}).get("exit", [])
+            if not exits:
+                return {"ok": False, "message": f"fase {phases[i]} sem ação de saída — não dá para atravessá-la pelo kanban",
+                        "fired": fired}
+            capture({"tag_id": tag_id, "action": exits[0], "event_ts": store.now_iso(),
+                     "source_type": "MANUAL", "operator_id": actor, "payload": payload})
+            fired.append(exits[0])
+        if to_idx - cur_idx > 1:
+            occ.append(store.raise_occurrence(tag_id, to_phase if to_phase != "DONE" else phases[-1], "PHASE_SKIPPED", "alerta",
+                       f"{to_idx - cur_idx - 1} fase(s) puladas no kanban por {actor}: {reason[:120]}"))
+    else:
+        # para trás: retrabalho — evento + ocorrência, fase volta, passado fica
+        store.append_event({"tag_id": tag_id, "action": "REWORK", "phase": to_phase, "domain": "AUDIT",
+                            "event_ts": store.now_iso(), "source_type": "MANUAL", "operator_id": actor,
+                            "payload": payload, "owner": "Quality"})
+        occ.append(store.raise_occurrence(tag_id, to_phase, "REWORK", "alerta",
+                   f"retorno de {cur} para {to_phase} por {actor}: {reason[:120]}"))
+        t = store.get_tag(tag_id)
+        t["current_phase"] = to_phase
+        t["state"] = "EXCEPTION" if store.open_pending_count(tag_id) > 0 else "IN_PROCESS"
+        t["last_event_ts"] = store.now_iso()
+        store.upsert_tag(t)
+        etapas.retroceder(tag_id, cur, to_phase, t["last_event_ts"])
+        fired.append("REWORK")
+
+    novo = store.get_tag(tag_id)
+    from .. import audit
+    audit.record("VPS", "CARD_MOVED", actor=actor, entity_type="tag", entity_id=tag_id, correlation_id=tag_id,
+                 severity="alerta" if occ else "info",
+                 summary=f"{novo.get('natural_key')}: {cur} → {to_phase} por {actor} — {reason[:100]}",
+                 payload={**payload, "fired": fired, "occurrences": occ, "state": novo.get("state")})
+    return {"ok": True, "tag_id": tag_id, "from": cur, "to": to_phase, "state": novo.get("state"),
+            "phase": novo.get("current_phase"), "fired": fired, "occurrences": occ}
 
 
 def seed(reset: bool = False) -> dict[str, Any]:

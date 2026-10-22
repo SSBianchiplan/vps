@@ -32,7 +32,7 @@ def clicktochat_link(phone: str, text: str = "") -> str:
     """Link 'Clique para conversar' (wa.me) — abre o WhatsApp com a mensagem
     pré-preenchida, SEM token/API e sem salvar o contato (Meta FAQ 425247423114725).
     O envio final é confirmado pelo usuário no app. `phone` em formato
-    internacional só com dígitos (ex.: 5548996623955)."""
+    internacional só com dígitos (ex.: 5547999998888)."""
     from urllib.parse import quote
 
     digits = "".join(ch for ch in phone if ch.isdigit())

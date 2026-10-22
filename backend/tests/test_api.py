@@ -4,7 +4,8 @@ from __future__ import annotations
 import base64
 import io
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient  # noqa: F401
+from tests.authclient import admin_client
 from PIL import Image
 
 from app.main import app
@@ -18,7 +19,7 @@ def _jpeg_b64() -> str:
 
 
 def test_health_and_capabilities():
-    with TestClient(app) as client:
+    with admin_client(app) as client:
         assert client.get("/api/health").json()["status"] == "ok"
         caps = client.get("/api/capabilities").json()
         assert caps["vlm"] is False  # sem ANTHROPIC_API_KEY nos testes
@@ -26,7 +27,7 @@ def test_health_and_capabilities():
 
 
 def test_task_crud_and_export():
-    with TestClient(app) as client:
+    with admin_client(app) as client:
         payload = {
             "mode": "DESCREVER",
             "params": {"mode": "DESCREVER", "foco": "esteira"},
@@ -47,7 +48,7 @@ def test_infer_degrada_sem_vlm():
     (YOLO) em vez de falhar — funcionalidade disponível sem token."""
     from app.orchestrator.router import Orchestrator
 
-    with TestClient(app) as client:
+    with admin_client(app) as client:
         body = {
             "image_b64": _jpeg_b64(),
             "task": {"mode": "DESCREVER", "params": {"mode": "DESCREVER"}},
@@ -65,7 +66,7 @@ def test_infer_degrada_sem_vlm():
 
 def test_events_endpoint_shape():
     """Trilha de rastreabilidade unificada: estrutura esperada + filtros."""
-    with TestClient(app) as client:
+    with admin_client(app) as client:
         resp = client.get("/api/events", params={"limit": 5})
         assert resp.status_code == 200
         body = resp.json()
@@ -89,7 +90,7 @@ def test_events_endpoint_shape():
 
 def test_events_summary_aggregates():
     """Agregação SQL rápida para widgets (sem trafegar linhas)."""
-    with TestClient(app) as client:
+    with admin_client(app) as client:
         r = client.get("/api/events/summary")
         assert r.status_code == 200
         body = r.json()
@@ -99,7 +100,7 @@ def test_events_summary_aggregates():
 
 def test_monitor_overview_validation():
     """Rota de monitoramento registrada e valida o período (sem sondar a rede)."""
-    with TestClient(app) as client:
+    with admin_client(app) as client:
         # período inválido é rejeitado antes do handler (sem probe de rede)
         assert client.get("/api/monitor/overview", params={"period": "xx"}).status_code == 422
 
@@ -109,7 +110,7 @@ def test_agir_rules_crud_and_eval():
     from app.actions import engine
     from app.schemas.enums import Mode, ModelType
     from app.schemas.results import InferenceResult
-    with TestClient(app) as client:
+    with admin_client(app) as client:
         cat = client.get("/api/actions/catalog").json()
         assert "alert_visual" in cat["action_types"] and "==" in cat["ops"]
         r = client.post("/api/tasks/TX/rules", json={
@@ -136,7 +137,7 @@ def test_agir_rules_crud_and_eval():
 
 def test_detectar_and_notify():
     """DETECTAR exposto/roteado e config WhatsApp degrada honestamente."""
-    with TestClient(app) as client:
+    with admin_client(app) as client:
         caps = client.get("/api/capabilities").json()
         assert "DETECTAR" in caps["modes"]
         # sem VLM nem edge nos testes → DETECTAR via /infer falha com 503 claro

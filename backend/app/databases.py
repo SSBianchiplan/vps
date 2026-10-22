@@ -12,6 +12,23 @@ from .config import get_settings
 from .db.database import _use_pg, get_connection
 
 
+def _motor() -> str:
+    """O motor de verdade, perguntado ao runtime — nunca escrito à mão.
+
+    Estes três painéis diziam "SQLite" desde antes da migração e continuaram
+    dizendo depois dela: quem abria a tela de Bases concluía que o Fio Dourado e
+    a trilha de auditoria rodavam em SQLite, enquanto as duas já estavam em
+    Postgres. Um rótulo fixo sobre um fato que muda vira mentira na primeira
+    migração; perguntar custa uma chamada de função.
+    """
+    return "PostgreSQL" if _use_pg() else "SQLite"
+
+
+def _grupo_runtime() -> str:
+    return f"Runtime ({_motor()})"
+
+
+
 def _count(sql: str) -> int | None:
     try:
         row = get_connection().execute(sql).fetchone()
@@ -33,29 +50,55 @@ def _primary() -> dict[str, Any]:
                     "ações": _count("SELECT COUNT(*) AS n FROM fact_action"),
                     "regras": _count("SELECT COUNT(*) AS n FROM dim_action_rule"),
                     "modelos": _count("SELECT COUNT(*) AS n FROM dim_model")},
+        # As consultas que produzem cada metrica: a tela mostra o SQL ao lado do
+        # numero, para o numero ser conferivel em vez de acreditado.
+        "sql": {
+            "inferências": "SELECT COUNT(*) FROM fact_detection",
+            "por pipeline (24h)": "SELECT pipeline, COUNT(*) FROM fact_detection WHERE timestamp > datetime('now','-1 day') GROUP BY pipeline",
+            "gravações": "SELECT COUNT(*) FROM fact_recording",
+            "modelos": "SELECT * FROM dim_model",
+        },
     }
 
 
 def _vps_runtime() -> dict[str, Any]:
-    """VPS Fio Dourado AO VIVO (event store + projeções no SQLite runtime)."""
+    """VPS Fio Dourado AO VIVO (event store + projeções no banco de runtime)."""
     ev = _count("SELECT COUNT(*) AS n FROM vps_event")
-    return {"key": "vps_rt", "name": "VPS · Fio Dourado (runtime)", "kind": "SQLite · event-sourced",
+    return {"key": "vps_rt", "name": "VPS · Fio Dourado (runtime)", "kind": _motor() + " · event-sourced",
             "status": "ok" if ev is not None else "off",
             "detail": "cockpit ao vivo: event store + projeções (Tag-ID) — distinto do teste_sistema (PG)",
             "metrics": {"eventos": ev, "tags": _count("SELECT COUNT(*) AS n FROM vps_tag"),
                         "vínculos": _count("SELECT COUNT(*) AS n FROM vps_lineage"),
                         "projetos": _count("SELECT COUNT(*) AS n FROM vps_project"),
                         "cards": _count("SELECT COUNT(*) AS n FROM vps_card"),
-                        "ocorrências": _count("SELECT COUNT(*) AS n FROM vps_occurrence")}}
+                        "ocorrências": _count("SELECT COUNT(*) AS n FROM vps_occurrence"),
+                        "pendências abertas": _count("SELECT COUNT(*) AS n FROM vps_pending WHERE cleared_ts IS NULL"),
+                        "programações APS": _count("SELECT COUNT(DISTINCT scenario_id) AS n FROM vps_schedule")},
+            "sql": {
+                "eventos por ação": "SELECT action, COUNT(*) FROM vps_event GROUP BY action ORDER BY 2 DESC",
+                "tags por estado": "SELECT entity_type, state, COUNT(*) FROM vps_tag GROUP BY 1,2",
+                "linhagem": "SELECT relation, COUNT(*) FROM vps_lineage GROUP BY relation",
+                "fio de uma tag": "SELECT * FROM vps_event WHERE tag_id = :tag ORDER BY event_ts",
+                "cards por projeto": "SELECT p.code, c.state, COUNT(*) FROM vps_card c JOIN vps_project p USING(project_id) GROUP BY 1,2",
+            }}
 
 
 def _audit_runtime() -> dict[str, Any]:
-    """Trilha de rastreabilidade total AO VIVO (audit_event no SQLite runtime)."""
+    """Trilha de rastreabilidade total AO VIVO (audit_event no banco de runtime)."""
     n = _count("SELECT COUNT(*) AS n FROM audit_event")
-    return {"key": "audit_rt", "name": "Trilha de auditoria (runtime)", "kind": "SQLite · append-only",
+    return {"key": "audit_rt", "name": "Trilha de auditoria (runtime)", "kind": _motor() + " · append-only",
             "status": "ok" if n is not None else "off",
             "detail": "rastreabilidade total (audit_event) — espelha no PG visiondesk_audit",
-            "metrics": {"eventos": n, "categorias": _count("SELECT COUNT(DISTINCT category) AS n FROM audit_event")}}
+            "metrics": {"eventos": n, "categorias": _count("SELECT COUNT(DISTINCT category) AS n FROM audit_event"),
+                        "negativas RBAC": _count("SELECT COUNT(*) AS n FROM audit_event WHERE action='RBAC_DENIED'"),
+                        "rodadas E2E": _count("SELECT COUNT(DISTINCT correlation_id) AS n FROM audit_event WHERE category='E2E'"),
+                        "eventos VPS": _count("SELECT COUNT(*) AS n FROM audit_event WHERE category='VPS'")},
+            "sql": {
+                "por categoria": "SELECT category, COUNT(*) FROM audit_event GROUP BY category ORDER BY 2 DESC",
+                "últimas 24h": "SELECT * FROM audit_event WHERE event_ts > datetime('now','-1 day') ORDER BY event_ts DESC",
+                "negativas de acesso": "SELECT event_ts, actor, summary FROM audit_event WHERE action='RBAC_DENIED' ORDER BY event_ts DESC",
+                "uma rodada E2E": "SELECT * FROM audit_event WHERE correlation_id = :run_id ORDER BY event_ts",
+            }}
 
 
 def _timescale() -> dict[str, Any]:
@@ -253,13 +296,13 @@ def _audit_pg() -> dict[str, Any]:
 
 # Agrupamento por categoria (p/ o módulo Bases listar organizado).
 _GROUPS = {
-    "primary": "Runtime (SQLite)", "vps_rt": "Runtime (SQLite)", "audit_rt": "Runtime (SQLite)",
+    "primary": _grupo_runtime(), "vps_rt": _grupo_runtime(), "audit_rt": _grupo_runtime(),
     "audit_pg": "PostgreSQL", "timescale": "PostgreSQL",
     "objstore": "Infraestrutura", "mqtt": "Infraestrutura", "mediamtx": "Infraestrutura",
     "whatsapp": "Config & stores", "cameras": "Config & stores",
     "anomaly": "Config & stores", "recording": "Config & stores",
 }
-_GROUP_ORDER = ["Runtime (SQLite)", "PostgreSQL", "Infraestrutura", "Config & stores"]
+_GROUP_ORDER = [_grupo_runtime(), "PostgreSQL", "Infraestrutura", "Config & stores"]
 
 
 def status() -> dict[str, Any]:

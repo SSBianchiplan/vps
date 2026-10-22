@@ -22,12 +22,65 @@ def list_operators(status: str | None = None) -> list[dict[str, Any]]:
         sql += " WHERE status=?"
         params.append(status)
     sql += " ORDER BY name"
-    return [dict(r) for r in get_connection().execute(sql, params).fetchall()]
+    linhas = [dict(r) for r in get_connection().execute(sql, params).fetchall()]
+    return [{**o, **_acesso(o["operator_id"])} for o in linhas]
+
+
+def _acesso(operator_id: str) -> dict[str, Any]:
+    """Face de ACESSO do mesmo cadastro: papel de login, perfil e se tem PIN/face.
+
+    A tela de Operadores precisa mostrar se aquela pessoa entra no sistema e
+    com que poder — senão o vínculo usuário↔operador existe no banco e não
+    aparece para quem opera.
+    """
+    r = get_connection().execute(
+        "SELECT role, perfil, active, (pin_hash IS NOT NULL) AS has_pin FROM vps_access WHERE operator_id=?",
+        (operator_id,)).fetchone()
+    if not r:
+        return {"tem_login": False, "login_role": None, "perfil": None, "login_ativo": None, "tem_pin": False, "tem_face": False}
+    d = dict(r)
+    f = get_connection().execute(
+        "SELECT 1 AS x FROM vps_face_template WHERE operator_id=? AND is_current=1", (operator_id,)).fetchone()
+    return {"tem_login": True, "login_role": d["role"], "perfil": d.get("perfil"),
+            "login_ativo": bool(d["active"]), "tem_pin": bool(d["has_pin"]), "tem_face": bool(f)}
+
+
+def opcoes() -> dict[str, list[str]]:
+    """Valores JÁ existentes em cada coluna — alimenta as listas segmentadas.
+
+    A tela oferece o que a base tem (estações, turnos, skills, papéis) em vez
+    de campo de texto livre: digitar "ALMOX 02" onde todo mundo escreveu
+    "ALMOX-02" cria uma estação fantasma que nenhuma consulta encontra.
+    """
+    def distintos(coluna: str, split_csv: bool = False) -> list[str]:
+        vals: set[str] = set()
+        for r in get_connection().execute(f"SELECT DISTINCT {coluna} AS v FROM vps_operator WHERE {coluna} IS NOT NULL").fetchall():
+            v = (dict(r)["v"] or "").strip()
+            if not v:
+                continue
+            if split_csv:
+                vals.update(x.strip() for x in v.split(",") if x.strip())
+            else:
+                vals.add(v)
+        return sorted(vals)
+
+    from ..vps import rbac
+    return {
+        "role": sorted(set(distintos("role")) | {"Operador", "Supervisor", "Líder", "Manutenção", "Qualidade", "Visitante"}),
+        "stations": sorted(set(distintos("stations", True)) | {"ALMOX-02", "LINHA-01", "CEL-MONT-01", "QC-01"}),
+        "skills": distintos("skills", True) or ["picking", "conferencia", "montagem", "inspecao", "supervisao"],
+        "shift": sorted(set(distintos("shift")) | {"T1", "T2", "T3", "ADM"}),
+        "status": ["ativo", "inativo"],
+        "perfil": list(rbac.PERFIS_OPERACIONAIS.keys()),
+        "login_role": ["admin", "operador", "view"],
+    }
 
 
 def get_operator(operator_id: str) -> dict[str, Any] | None:
     r = get_connection().execute("SELECT * FROM vps_operator WHERE operator_id=?", (operator_id,)).fetchone()
-    return dict(r) if r else None
+    if not r:
+        return None
+    return {**dict(r), **_acesso(operator_id)}
 
 
 def by_badge(badge: str) -> dict[str, Any] | None:

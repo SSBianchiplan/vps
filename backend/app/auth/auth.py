@@ -12,8 +12,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..db.database import get_connection
+from ..logging_conf import get_logger
 
 ROLES = ("admin", "operador", "view")
+# Perfis operacionais (o que um "operador" governa) — definidos em vps/rbac.py.
+PERFIS = ("Operations", "Supply", "Quality", "Projects")
+
+log = get_logger("visiondesk.auth")
 
 # Matriz de capacidades por papel (exibida no módulo Acesso & Regras).
 MATRIX = [
@@ -51,7 +56,7 @@ def _has_face(oid: str) -> bool:
 
 def users() -> list[dict[str, Any]]:
     rows = get_connection().execute(
-        "SELECT operator_id, name, role, active, (pin_hash IS NOT NULL) AS has_pin, created_at "
+        "SELECT operator_id, name, role, perfil, active, (pin_hash IS NOT NULL) AS has_pin, created_at "
         "FROM vps_access ORDER BY created_at DESC").fetchall()
     out = []
     for r in rows:
@@ -61,25 +66,76 @@ def users() -> list[dict[str, Any]]:
     return out
 
 
-def upsert_user(name: str, role: str, operator_id: str | None = None, pin: str | None = None) -> dict[str, Any]:
+def upsert_user(name: str, role: str, operator_id: str | None = None, pin: str | None = None,
+                perfil: str | None = None) -> dict[str, Any]:
     if role not in ROLES:
         return {"ok": False, "message": "papel inválido (admin|operador|view)"}
+    if perfil is not None and perfil not in PERFIS:
+        return {"ok": False, "message": f"perfil operacional inválido ({'|'.join(PERFIS)})"}
     oid = operator_id or ("op_" + name.strip().lower().replace(" ", "_"))
-    # cria/atualiza o operador (master data) também
+    # Um cadastro, duas faces: quem tem login é operador do chão de fábrica.
+    # Antes esta escrita falhava calada (except: pass) e a tela de Operadores
+    # mostrava só os dois de exemplo, enquanto Acesso & Regras tinha seis
+    # usuários — duas listas de pessoas que deveriam ser a mesma.
     try:
         from ..vps import operators
-        operators.upsert_operator({"operator_id": oid, "name": name, "role": role})
+        atual = operators.get_operator(oid) or {}
+        operators.upsert_operator({
+            "operator_id": oid, "name": name,
+            # papel do operador segue o perfil operacional quando houver;
+            # senão, traduz o papel de acesso para o vocabulário do chão.
+            "role": perfil or atual.get("role") or {"admin": "Supervisor", "operador": "Operador", "view": "Visitante"}.get(role, "Operador"),
+            "matricula": atual.get("matricula"), "badge": atual.get("badge"),
+            "stations": atual.get("stations"), "skills": atual.get("skills"),
+            "shift": atual.get("shift"), "status": atual.get("status", "ativo"),
+        })
     except Exception:  # noqa: BLE001
-        pass
+        log.exception("usuário %s criado sem espelho em operadores", oid)
     ph = _hash(pin) if pin else None
     conn = get_connection()
     conn.execute(
-        "INSERT INTO vps_access(operator_id,name,role,pin_hash,active,created_at) VALUES (?,?,?,?,1,?)"
+        "INSERT INTO vps_access(operator_id,name,role,pin_hash,active,created_at,perfil) VALUES (?,?,?,?,1,?,?)"
         " ON CONFLICT(operator_id) DO UPDATE SET name=excluded.name, role=excluded.role,"
-        " pin_hash=COALESCE(excluded.pin_hash, vps_access.pin_hash)",
-        (oid, name, role, ph, _now()))
-    _event("USER_UPSERT", oid, summary=f"usuário {name} ({role})")
-    return {"ok": True, "operator_id": oid, "name": name, "role": role}
+        " pin_hash=COALESCE(excluded.pin_hash, vps_access.pin_hash),"
+        " perfil=COALESCE(excluded.perfil, vps_access.perfil)",
+        (oid, name, role, ph, _now(), perfil))
+    _event("USER_UPSERT", oid, summary=f"usuário {name} ({role}{' · ' + perfil if perfil else ''})")
+    return {"ok": True, "operator_id": oid, "name": name, "role": role, "perfil": perfil}
+
+
+def sync_operators() -> int:
+    """Garante que todo usuário do sistema tenha a face de operador.
+
+    Roda no boot e é idempotente. Existe porque os usuários criados ANTES do
+    vínculo ficaram só em vps_access: a tela de Operadores mostrava três
+    pessoas de exemplo enquanto Acesso & Regras tinha seis usuários reais.
+    """
+    n = 0
+    try:
+        from ..vps import operators
+        for u in users():
+            if operators.get_operator(u["operator_id"]):
+                continue
+            operators.upsert_operator({
+                "operator_id": u["operator_id"], "name": u["name"],
+                "role": u.get("perfil") or {"admin": "Supervisor", "operador": "Operador", "view": "Visitante"}.get(u["role"], "Operador"),
+                "status": "ativo" if u.get("active", True) else "inativo",
+            })
+            n += 1
+        if n:
+            log.info("operadores espelhados a partir de usuários: %d", n)
+    except Exception:  # noqa: BLE001
+        log.exception("falha ao espelhar usuários em operadores (não fatal)")
+    return n
+
+
+def set_perfil(oid: str, perfil: str | None) -> dict[str, Any]:
+    """Perfil operacional (Operations|Supply|Quality|Projects) — o que o operador governa."""
+    if perfil is not None and perfil not in PERFIS:
+        return {"ok": False, "message": f"perfil inválido ({'|'.join(PERFIS)})"}
+    get_connection().execute("UPDATE vps_access SET perfil=? WHERE operator_id=?", (perfil, oid))
+    _event("USER_PERFIL_SET", oid, summary=f"perfil operacional → {perfil or '—'}")
+    return {"ok": True, "perfil": perfil}
 
 
 def set_role(oid: str, role: str) -> dict[str, Any]:
@@ -92,6 +148,12 @@ def set_role(oid: str, role: str) -> dict[str, Any]:
 
 def set_active(oid: str, active: bool) -> dict[str, Any]:
     get_connection().execute("UPDATE vps_access SET active=? WHERE operator_id=?", (1 if active else 0, oid))
+    # espelha no master data: desativar o login desativa a pessoa no chão
+    try:
+        from ..vps import operators
+        operators.set_status(oid, "ativo" if active else "inativo")
+    except Exception:  # noqa: BLE001
+        pass
     _event("USER_ACTIVE_SET", oid, severity="alerta" if not active else "info",
            summary=f"usuário {'ativado' if active else 'desativado'}")
     return {"ok": True}
@@ -166,12 +228,57 @@ def login_pin(operator_id: str, pin: str) -> dict[str, Any]:
     return _new_session(operator_id, acc["name"], acc["role"], "pin")
 
 
+def dev_login() -> dict[str, Any]:
+    """Login de conveniência p/ desenvolvimento — garante um admin 'DEV Admin'
+    (op_dev, ativo) e abre uma sessão real (token). Sempre auditado como alerta.
+
+    O gate de ambiente fica na rota (routes_auth): só é permitido em modo aberto
+    (sem VISIONDESK_API_KEY). Nunca deve ficar acessível em produção.
+    """
+    oid = "op_dev"
+    if not _access(oid):
+        upsert_user("DEV Admin", "admin", operator_id=oid)
+    else:
+        get_connection().execute("UPDATE vps_access SET role='admin', active=1 WHERE operator_id=?", (oid,))
+    _event("LOGIN_DEV", oid, severity="alerta", summary="login DEV Admin (modo aberto/dev)")
+    return _new_session(oid, "DEV Admin", "admin", "dev")
+
+
 def session(token: str | None) -> dict[str, Any] | None:
     if not token:
         return None
+    # JOIN com vps_access: o perfil operacional e o "ativo" valem AGORA, nao no
+    # momento do login — desativar um usuario derruba a sessao dele na hora.
     r = get_connection().execute(
-        "SELECT operator_id, name, role, method FROM auth_session WHERE token=?", (token,)).fetchone()
-    return dict(r) if r else None
+        "SELECT s.operator_id, s.name, a.role, s.method, a.perfil, a.active, s.created_at"
+        " FROM auth_session s LEFT JOIN vps_access a ON a.operator_id=s.operator_id WHERE s.token=?",
+        (token,)).fetchone()
+    if not r:
+        return None
+    d = dict(r)
+    # Sessão órfã (usuário removido de vps_access) não vale: antes o LEFT JOIN
+    # devolvia role=None e o token seguia "autenticado".
+    if not d.get("active") or not d.get("role"):
+        return None
+    # Validade (auditoria out/2026): o token não expirava nunca.
+    if _expired(d.pop("created_at", None)):
+        return None
+    d.pop("active", None)
+    return d
+
+
+def _expired(created_at: Any) -> bool:
+    from ..config import get_settings
+    ttl = get_settings().session_ttl_hours
+    if not ttl or ttl <= 0 or not created_at:
+        return False
+    try:
+        t = created_at if isinstance(created_at, datetime) else datetime.fromisoformat(str(created_at))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - t).total_seconds() > ttl * 3600
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def logout(token: str | None) -> dict[str, Any]:

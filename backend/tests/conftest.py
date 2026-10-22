@@ -15,3 +15,6 @@ os.environ["VISIONDESK_PERSIST_FRAMES"] = "false"
 # ambiente vazia tem precedência sobre o valor do .env real, garantindo que a
 # suíte não dependa de uma chave presente no ambiente local.
 os.environ["ANTHROPIC_API_KEY"] = ""
+# Produção não roda com o atalho de DEV: os testes sobem como produção.
+os.environ["VISIONDESK_DEV_LOGIN"] = "false"
+os.environ.pop("VISIONDESK_API_KEY", None)

@@ -1,8 +1,10 @@
 """LGPD — anonimização (blur facial) + retenção de imagens (SPEC_VPS §15).
 
 Imagens podem conter pessoas → política de retenção + blur facial + acesso restrito.
-Blur via Haar cascade do OpenCV (sem dependência extra); degrada p/ no-op se cv2
-indisponível. Retenção apaga frames/gravações além da janela configurada.
+Blur usa o MESMO detector do módulo facial (biometrics/face.py): YuNet quando os
+modelos estão presentes, Haar como reserva. Antes tinha um Haar próprio aqui — e
+o OpenCV 5 removeu o CascadeClassifier, o que deixaria o blur em no-op silencioso
+com a política LGPD ligada. Retenção apaga frames/gravações além da janela.
 """
 from __future__ import annotations
 
@@ -15,8 +17,6 @@ from ..logging_conf import get_logger
 
 log = get_logger("visiondesk.vps.lgpd")
 _blur_override: bool | None = None
-_cascade = None
-_cascade_tried = False
 
 
 def blur_enabled() -> bool:
@@ -28,36 +28,28 @@ def set_blur(on: bool) -> None:
     _blur_override = on
 
 
-def _face_cascade():
-    global _cascade, _cascade_tried
-    if _cascade_tried:
-        return _cascade
-    _cascade_tried = True
+def _detector_ok() -> bool:
     try:
-        import cv2  # type: ignore
-        path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
-        c = cv2.CascadeClassifier(str(path))
-        _cascade = c if not c.empty() else None
+        from ..biometrics import face
+        return face.available()
     except Exception:  # noqa: BLE001
-        _cascade = None
-    return _cascade
+        return False
 
 
 def anonymize(jpeg: bytes) -> bytes:
     """Borra rostos no JPEG. Retorna original se desligado / sem cv2 / sem rosto."""
     if not blur_enabled():
         return jpeg
-    cascade = _face_cascade()
-    if cascade is None:
+    if not _detector_ok():
         return jpeg
     try:
         import cv2  # type: ignore
         import numpy as np  # type: ignore
+        from ..biometrics import face
         img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             return jpeg
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(gray, 1.2, 5, minSize=(24, 24))
+        faces = face.detect_faces(img)
         for (x, y, w, h) in faces:
             roi = img[y:y + h, x:x + w]
             k = max(15, (w // 3) | 1)  # kernel ímpar proporcional
@@ -101,5 +93,5 @@ def status() -> dict[str, Any]:
     counts = {}
     for d in _dirs():
         counts[d.name] = sum(1 for f in d.glob("*") if f.is_file())
-    return {"blur": blur_enabled(), "blur_available": _face_cascade() is not None,
+    return {"blur": blur_enabled(), "blur_available": _detector_ok(),
             "retention_days": s.vps_retention_days, "files": counts}

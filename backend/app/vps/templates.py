@@ -23,8 +23,9 @@ TEMPLATES: dict[str, dict[str, Any]] = {
         "phases": [
             {"id": "ENGINEERING", "entry": ["SO_RELEASED", "OP_OPENED"], "exit": ["DRAWINGS_APPROVED"], "sla_hours": 24},
             {"id": "PURCHASING", "exit": ["SUPPLY_LINKED"], "sla_hours": 48},
+            {"id": "PCP", "entry": ["STRUCTURE_REQUESTED"], "exit": ["STRUCTURE_RELEASED"], "blocking_on": ["BOM_INCOMPLETE"], "requires": ["estrutura_liberada"], "sla_hours": 12},
             {"id": "PICKING", "vision": {"mode": "CONTAR", "min_confidence": 0.95},
-             "exit": ["PICK_COMPLETED"], "blocking_on": ["PICK_SHORT"], "sla_hours": 8},
+             "exit": ["PICK_COMPLETED"], "blocking_on": ["PICK_SHORT"], "requires": ["separacao_completa"], "sla_hours": 8},
             {"id": "ASSEMBLY", "vision": {"mode": "DESCREVER"}, "exit": ["OP_OPERATION_DONE"], "sla_hours": 40},
             {"id": "TESTING", "vision": {"mode": "ANALISAR"}, "exit": ["MEASUREMENT_APPROVED"], "sla_hours": 8},
             {"id": "SHIPPING", "exit": ["SHIPPED"], "sla_hours": 24},
@@ -38,6 +39,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
         "label": "Genérico (recebimento → expedição)",
         "phases": [
             {"id": "INTAKE", "entry": ["OP_OPENED", "RECEIVED"], "exit": ["INTAKE_DONE"], "sla_hours": 8},
+            {"id": "PCP", "entry": ["STRUCTURE_REQUESTED"], "exit": ["STRUCTURE_RELEASED"], "blocking_on": ["BOM_INCOMPLETE"], "requires": ["estrutura_liberada"], "sla_hours": 12},
             {"id": "PROCESS", "vision": {"mode": "CONTAR"}, "exit": ["PROCESS_DONE"], "blocking_on": ["SHORT"], "sla_hours": 24},
             {"id": "QC", "vision": {"mode": "ANALISAR"}, "exit": ["QC_APPROVED"], "sla_hours": 8},
             {"id": "SHIPPING", "exit": ["SHIPPED"], "sla_hours": 24},
@@ -72,6 +74,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
         "template_id": "FOOD_V1", "segment": "FOOD", "label": "Alimentos (recebimento→expedição)",
         "phases": [
             {"id": "RECEIVING", "entry": ["OP_OPENED", "RECEIVED"], "exit": ["RECEIVING_DONE"], "sla_hours": 4},
+            {"id": "PCP", "entry": ["STRUCTURE_REQUESTED"], "exit": ["STRUCTURE_RELEASED"], "blocking_on": ["BOM_INCOMPLETE"], "requires": ["estrutura_liberada"], "sla_hours": 12},
             {"id": "PROCESSING", "vision": {"mode": "CONTAR", "min_confidence": 0.9}, "exit": ["PROCESS_DONE"], "blocking_on": ["SHORT"], "sla_hours": 12},
             {"id": "PACKAGING", "vision": {"mode": "DESCREVER"}, "exit": ["PACKED"], "sla_hours": 6},
             {"id": "COLD_STORAGE", "exit": ["STORED"], "sla_hours": 24},
@@ -82,7 +85,8 @@ TEMPLATES: dict[str, dict[str, Any]] = {
     "PHARMA_V1": {
         "template_id": "PHARMA_V1", "segment": "PHARMA", "label": "Farma (lote rastreável + QC)",
         "phases": [
-            {"id": "DISPENSING", "entry": ["OP_OPENED", "DISPENSED"], "exit": ["DISPENSE_DONE"], "sla_hours": 8},
+            {"id": "PCP", "entry": ["OP_OPENED", "STRUCTURE_REQUESTED"], "exit": ["STRUCTURE_RELEASED"], "blocking_on": ["BOM_INCOMPLETE"], "requires": ["estrutura_liberada"], "sla_hours": 12},
+            {"id": "DISPENSING", "entry": ["DISPENSED"], "exit": ["DISPENSE_DONE"], "sla_hours": 8},
             {"id": "PRODUCTION", "vision": {"mode": "DESCREVER"}, "exit": ["PRODUCTION_DONE"], "sla_hours": 48},
             {"id": "QC", "vision": {"mode": "ANALISAR", "min_confidence": 0.97}, "exit": ["QC_APPROVED"], "blocking_on": ["QC_FAILED"], "sla_hours": 24},
             {"id": "RELEASE", "exit": ["RELEASED"], "sla_hours": 12},
@@ -98,6 +102,7 @@ _DOMAIN_PREFIX: dict[str, str] = {
     "OCCURRENCE": "OCC", "PENDING": "PENDING", "SO": "SALES", "PROJ": "PROJECT",
     "MILESTONE": "PROJECT", "MEASUREMENT": "MEAS", "INVOICE": "BILLING",
     "BILLABLE": "BILLING", "DRAWINGS": "ENGINEERING",
+    "STRUCTURE": "PCP", "BOM": "PCP", "DEMAND": "PCP",
 }
 _DOMAIN_EXACT: dict[str, str] = {
     "RECEIVED": "ALMOX", "PUTAWAY": "ALMOX", "MOVED": "ALMOX", "ISSUED": "ALMOX",
@@ -109,7 +114,7 @@ _OWNER: dict[str, str] = {
     "OP": "Operations", "PICK": "Supply", "SUPPLY": "Supply", "STOCK": "Supply",
     "ALMOX": "Supply", "SALES": "Sales", "PROJECT": "Projects", "MEAS": "Quality",
     "OCC": "Quality", "BILLING": "Finance", "LOGISTICS": "Operations",
-    "ENGINEERING": "Engineering",
+    "ENGINEERING": "Engineering", "PCP": "PCP",
 }
 
 

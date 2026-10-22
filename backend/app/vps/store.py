@@ -49,6 +49,12 @@ def recent_events(limit: int = 100) -> list[dict[str, Any]]:
 
 
 def max_event_rowid() -> int:
+    """Marca d'água do WebSocket do cockpit (e das cargas incrementais).
+
+    No PostgreSQL é a coluna `seq` (BIGSERIAL), garantida por
+    `db.database._pg_contrato_eventos`; no SQLite, o rowid, que `traduz_sql`
+    reescreve para `seq`.
+    """
     r = get_connection().execute("SELECT MAX(rowid) m FROM vps_event").fetchone()
     return int(dict(r)["m"]) if r and dict(r)["m"] is not None else 0
 
@@ -221,7 +227,8 @@ def set_recon_status(tag_id: str, status: str) -> None:
 def reset() -> None:
     """Limpa as tabelas de processo VPS (mantém docs ERP). Usado por seed?reset=true."""
     conn = get_connection()
-    for t in ("vps_event", "vps_tag", "vps_lineage", "vps_pending", "vps_occurrence"):
+    for t in ("vps_event", "vps_tag", "vps_lineage", "vps_pending", "vps_occurrence",
+              "vps_phase_log", "vps_pick_demand"):
         conn.execute(f"DELETE FROM {t}")
 
 
@@ -298,6 +305,24 @@ def schedule(scenario_id: str) -> list[dict[str, Any]]:
     rows = get_connection().execute(
         "SELECT * FROM vps_schedule WHERE scenario_id=? ORDER BY resource_key, seq", (scenario_id,)).fetchall()
     return [dict(r) for r in rows]
+
+
+def schedule_row(schedule_id: str) -> dict[str, Any] | None:
+    r = get_connection().execute(
+        "SELECT * FROM vps_schedule WHERE schedule_id=?", (schedule_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def update_schedule_row(schedule_id: str, patch: dict[str, Any]) -> None:
+    """UPDATE de uma operacao. O arrasto no Gantt mexe em UMA linha; reescrever
+    o cenario inteiro (save_schedule) apagaria e recriaria todas as outras, e o
+    change_log registraria dezenas de mudancas que ninguem fez."""
+    if not patch:
+        return
+    campos = ", ".join(f"{k}=?" for k in patch)
+    get_connection().execute(
+        f"UPDATE vps_schedule SET {campos} WHERE schedule_id=?",
+        (*patch.values(), schedule_id))
 
 
 def scenarios() -> list[str]:

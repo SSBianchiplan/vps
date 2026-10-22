@@ -8,10 +8,19 @@
 # ─────────────────────────────────────────────────────────────
 numpy>=1.26
 opencv-python-headless>=4.10
-ultralytics>=8.3          # YOLO11 / RT-DETR + ByteTrack/BoT-SORT embutidos
+ultralytics>=8.3          # YOLO26/YOLO11 / RT-DETR + ByteTrack/BoT-SORT embutidos
+# lap resolve a atribuicao linear do ByteTrack. NAO e opcional: sem ele o modo
+# RASTREAR devolve 500 com ModuleNotFoundError, e o erro aparece so no primeiro
+# uso do tracking — a detecção comum segue funcionando e esconde a falta.
+lap>=0.5.12
 # OCR LER sem token no macOS — Apple Vision nativo (sem download de modelo):
 pyobjc-framework-Vision>=10.0 ; sys_platform == "darwin"
 pyobjc-framework-Quartz>=10.0 ; sys_platform == "darwin"
-# paddleocr>=2.8           # OCR alternativo multiplataforma
-# onnxruntime>=1.19
+# OCR LER sem token no Linux/Windows — RapidOCR: sao os MESMOS modelos PP-OCR do
+# PaddleOCR, exportados para ONNX. Existe porque o paddlepaddle (o motor do
+# PaddleOCR) NAO publica wheel para Python 3.13/3.14, que e o do servidor; sem
+# isto o modo LER fica refem de credito na conta do VLM.
+rapidocr-onnxruntime>=1.2
+onnxruntime>=1.19
+# paddleocr>=2.8           # so em Python <=3.12, onde o paddlepaddle tem wheel
 # coremltools>=8.0

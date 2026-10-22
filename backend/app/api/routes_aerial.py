@@ -98,8 +98,14 @@ def aerial_test_start(body: TestIn, path: str = Query(default="")) -> dict:
     p = _pick(path)
     if _alive(_tests.get(p)):
         return {"running": True}
+    # Auditoria out/2026: o comando vinha do corpo e o ffmpeg aceita ler e
+    # gravar qualquer arquivo/URL (ex.: -i /opt/visiondesk/.env -f data http://...).
+    # Comando livre só em desenvolvimento aberto; em produção, só o padrão.
+    from ..config import get_settings
+    s = get_settings()
+    custom = body.command if (s.dev_login and not s.api_key) else None
     try:
-        argv = shlex.split((body.command or _default_test_cmd(p)).strip())
+        argv = shlex.split((custom or _default_test_cmd(p)).strip())
     except ValueError as exc:
         return {"running": False, "error": f"comando inválido: {exc}"}
     if not argv or argv[0] != "ffmpeg":

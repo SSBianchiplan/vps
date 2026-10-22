@@ -111,6 +111,100 @@ def generate(scenario: str = "base", rule: str = "prioridade") -> dict[str, Any]
             "resources": [{"resource_key": r["resource_key"], "name": r["name"], "capacity": r["capacity"]} for r in res]}
 
 
+def _resequenciar(scenario: str, resource_key: str) -> None:
+    """seq = ordem no recurso. Depois de arrastar, a ordem antiga mente."""
+    fila = sorted((r for r in store.schedule(scenario) if r["resource_key"] == resource_key),
+                  key=lambda r: r["planned_start"] or "")
+    for i, r in enumerate(fila, 1):
+        if r["seq"] != i:
+            store.update_schedule_row(r["schedule_id"], {"seq": i})
+
+
+def _conflitos(scenario: str, resource_key: str) -> list[dict[str, Any]]:
+    """Sobreposicao acima da capacidade do recurso.
+
+    Capacidade finita e o coracao do APS: duas operacoes ao mesmo tempo num
+    recurso de capacidade 1 nao e um plano, e uma promessa que o chao de fabrica
+    nao consegue cumprir. O arrasto manual NAO e bloqueado (quem planeja as
+    vezes sabe de algo que o modelo nao sabe), mas o estouro volta marcado.
+    """
+    cap = next((int(x["capacity"] or 1) for x in store.resources()
+                if x["resource_key"] == resource_key), 1)
+    fila = [r for r in store.schedule(scenario) if r["resource_key"] == resource_key]
+    fora = []
+    for a in fila:
+        ini_a, fim_a = _p(a["planned_start"]), _p(a["planned_end"])
+        junto = [b for b in fila if b["schedule_id"] != a["schedule_id"]
+                 and _p(b["planned_start"]) < fim_a and _p(b["planned_end"]) > ini_a]
+        if len(junto) + 1 > cap:
+            fora.append({"schedule_id": a["schedule_id"], "tag_id": a["tag_id"],
+                         "operation": a["operation"], "resource_key": resource_key,
+                         "simultaneas": len(junto) + 1, "capacidade": cap})
+    return fora
+
+
+def reschedule(schedule_id: str, planned_start: str, planned_end: str,
+               resource_key: str | None = None, reason: str = "",
+               actor: str = "planner") -> dict[str, Any] | None:
+    """Move/estica UMA operacao — o arrasto do cronograma.
+
+    Justificativa obrigatoria, como em qualquer movimento de fase: um plano que
+    muda sozinho, sem quem e por que, nao e auditavel. Sai do plano automatico
+    (rule_used='manual') e volta a NAO publicado: o chao de fabrica so ve o que
+    foi publicado de proposito.
+    """
+    row = store.schedule_row(schedule_id)
+    if row is None:
+        return None
+    if len((reason or "").strip()) < 5:
+        return {"ok": False, "message": "justificativa obrigatoria (minimo 5 caracteres)"}
+    try:
+        ini, fim = _p(planned_start), _p(planned_end)
+    except ValueError:
+        return {"ok": False, "message": "datas invalidas (use ISO 8601)"}
+    if fim <= ini:
+        return {"ok": False, "message": "o fim precisa ser depois do inicio"}
+
+    recursos = {r["resource_key"]: r for r in store.resources()}
+    rk = resource_key or row["resource_key"]
+    if rk not in recursos:
+        return {"ok": False, "message": f"recurso '{rk}' nao existe",
+                "resources": sorted(recursos)}
+    # Skill: a fase precisa caber no recurso, senao o plano promete o impossivel.
+    skills = _csv(recursos[rk].get("skills"))
+    if skills and row["operation"].lower() not in skills:
+        return {"ok": False, "message":
+                f"'{recursos[rk]['name']}' nao atende a fase {row['operation']} "
+                f"(skills: {', '.join(skills)})",
+                "resources": sorted(k for k, v in recursos.items()
+                                    if not _csv(v.get("skills"))
+                                    or row["operation"].lower() in _csv(v.get("skills")))}
+
+    scenario = row["scenario_id"]
+    antes = {"planned_start": row["planned_start"], "planned_end": row["planned_end"],
+             "resource_key": row["resource_key"]}
+    setup = int(row.get("setup_min") or 0)
+    dur = int((fim - ini).total_seconds() // 60)
+    store.update_schedule_row(schedule_id, {
+        "planned_start": ini.isoformat(), "planned_end": fim.isoformat(),
+        "resource_key": rk, "run_min": max(1, dur - setup),
+        "rule_used": "manual", "published": 0,
+    })
+    _resequenciar(scenario, rk)
+    if rk != row["resource_key"]:
+        _resequenciar(scenario, row["resource_key"])
+
+    depois = {"planned_start": ini.isoformat(), "planned_end": fim.isoformat(), "resource_key": rk}
+    store.append_event({
+        "tag_id": row["tag_id"], "action": "SCHEDULE_RESCHEDULED", "phase": row["operation"],
+        "domain": "APS", "event_ts": store.now_iso(), "owner": actor,
+        "payload": {"schedule_id": schedule_id, "scenario": scenario,
+                    "reason": reason.strip(), "de": antes, "para": depois},
+    })
+    return {"ok": True, "row": store.schedule_row(schedule_id),
+            "conflicts": _conflitos(scenario, rk), "kpis": kpis(scenario), "load": load(scenario)}
+
+
 def load(scenario: str = "base") -> list[dict[str, Any]]:
     """Utilização por recurso (capacidade finita) + gargalo."""
     rows = store.schedule(scenario)

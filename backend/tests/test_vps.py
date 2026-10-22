@@ -273,7 +273,7 @@ def test_aps_features():
 def test_e2e_run_passes():
     r = e2e.run()
     assert r["passed"] is True
-    assert len(r["steps"]) == 20
+    assert len(r["steps"]) == 22
     assert all(s["ok"] for s in r["steps"])
     assert r["acceptance"]["lineage_9"] and r["acceptance"]["compensation"] and r["acceptance"]["archived"]
     assert r["kpis"]["estado_final"] == "ARCHIVED"

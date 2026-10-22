@@ -23,7 +23,7 @@ class WhatsAppConfigIn(BaseModel):
 
 
 class LinkIn(BaseModel):
-    to: str                                # número internacional (ex.: 5548996623955)
+    to: str                                # número internacional (ex.: 5547999998888)
     message: str = ""
 
 

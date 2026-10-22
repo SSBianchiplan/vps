@@ -1,11 +1,17 @@
 """Detecção de anomalia não supervisionada (PatchCore-lite) — §3.4.
 
 Sem rótulos de defeito: aprende a distribuição do "normal" a partir de frames
-de referência (embeddings do YOLO11, 256-d, totalmente local) e pontua novos
+de referência (embeddings do detector edge, totalmente local) e pontua novos
 frames pela distância à memória de normais. Score alto = desvio do normal.
 
 Memory bank por perfil (source_id) persistido em data/anomaly/{perfil}.npz:
-  X (N,256) embeddings L2-normalizados · mu/sigma/tau (calibração NN-distance).
+  X (N,d) embeddings L2-normalizados · mu/sigma/tau (calibração NN-distance).
+
+A DIMENSÃO d DEPENDE DO MODELO: YOLO11n embeda em 256-d, YOLO26s em 512-d.
+Um banco treinado com um modelo é incomparável com os embeddings de outro — e
+o produto `X @ q` estouraria com erro de forma, virando 500 na cara do usuário.
+Por isso o banco guarda `dim` e o nome do modelo, e um perfil de outro modelo é
+reportado como "refaça o fit" em vez de quebrar.
 """
 from __future__ import annotations
 
@@ -39,6 +45,24 @@ def _embed_norm(image_bytes: bytes):
     return (v / n).astype("float32")
 
 
+def _modelo() -> str:
+    """Nome dos pesos em uso — grava no banco p/ detectar troca de modelo."""
+    return Path(get_settings().yolo_weights).name
+
+
+def _incompativel(d, q) -> dict[str, Any] | None:
+    """Banco treinado com outro modelo (dimensão diferente)? Avisa em vez de estourar."""
+    dim_banco = int(d["X"].shape[1])
+    if dim_banco == len(q):
+        return None
+    antigo = str(d["modelo"]) if "modelo" in d.files else "modelo anterior"
+    return {
+        "supported": True, "fitted": False,
+        "message": (f"perfil treinado com {antigo} ({dim_banco}-d) e o detector atual "
+                    f"é {_modelo()} ({len(q)}-d) — refaça o fit desta cena"),
+    }
+
+
 def _pairwise_nn_stats(X) -> tuple[float, float]:
     """Para cada ref, distância ao vizinho mais próximo no banco → (média, desvio)."""
     import numpy as np
@@ -61,8 +85,10 @@ def fit(profile: str, images: list[bytes]) -> dict[str, Any]:
     X = np.stack(vecs)
     mu, sigma = _pairwise_nn_stats(X)
     tau = mu + 3 * sigma if sigma > 0 else (mu * 1.5 if mu > 0 else 0.35)
-    np.savez(_file(profile), X=X, mu=mu, sigma=sigma, tau=tau)
-    return {"ok": True, "supported": True, "n_ref": int(len(X)), "tau": round(float(tau), 4)}
+    np.savez(_file(profile), X=X, mu=mu, sigma=sigma, tau=tau,
+             modelo=np.array(_modelo(), dtype="U120"), dim=np.array(X.shape[1]))
+    return {"ok": True, "supported": True, "n_ref": int(len(X)),
+            "tau": round(float(tau), 4), "modelo": _modelo()}
 
 
 def status(profile: str) -> dict[str, Any]:
@@ -71,7 +97,10 @@ def status(profile: str) -> dict[str, Any]:
     if not f.exists():
         return {"fitted": False, "n_ref": 0, "supported": available()}
     d = np.load(f)
-    return {"fitted": True, "n_ref": int(d["X"].shape[0]), "tau": round(float(d["tau"]), 4), "supported": available()}
+    modelo = str(d["modelo"]) if "modelo" in d.files else "modelo anterior"
+    return {"fitted": True, "n_ref": int(d["X"].shape[0]), "tau": round(float(d["tau"]), 4),
+            "supported": available(), "modelo": modelo, "dim": int(d["X"].shape[1]),
+            "modelo_atual": _modelo()}
 
 
 def score(profile: str, image_bytes: bytes) -> dict[str, Any]:
@@ -82,8 +111,11 @@ def score(profile: str, image_bytes: bytes) -> dict[str, Any]:
     if not f.exists():
         return {"supported": True, "fitted": False, "message": "perfil não treinado (fit primeiro)"}
     d = np.load(f)
-    X, tau = d["X"], float(d["tau"])
     q = _embed_norm(image_bytes)
+    incomp = _incompativel(d, q)
+    if incomp:
+        return incomp
+    X, tau = d["X"], float(d["tau"])
     sims = X @ q
     nn_sim = float(sims.max())
     dist = float(np.sqrt(max(0.0, 2.0 - 2.0 * nn_sim)))

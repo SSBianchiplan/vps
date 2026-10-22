@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
@@ -16,6 +16,7 @@ from .api import (
     routes_automation,
     routes_anomaly,
     routes_cameras,
+    routes_changes,
     routes_classify,
     routes_config,
     routes_databases,
@@ -79,6 +80,13 @@ async def lifespan(app: FastAPI):
         stream.sync_blocked([c["ip"] for c in saved.list_public() if not c.get("enabled", True)])
     except Exception:  # noqa: BLE001
         log.exception("falha ao sincronizar câmeras desligadas (não fatal)")
+    # Todo usuário do sistema é também operador do chão de fábrica (uma pessoa,
+    # um cadastro). Idempotente: só escreve quem ainda não tem espelho.
+    try:
+        from .auth import auth as _auth
+        _auth.sync_operators()
+    except Exception:  # noqa: BLE001
+        log.exception("sync usuários→operadores falhou (não fatal)")
     asyncio.create_task(asyncio.to_thread(_warmup_edge))
     yield
     from .workers import manager
@@ -87,12 +95,23 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    import asyncio
+    from .api import guard
     settings = get_settings()
+    docs = settings.expose_docs
     app = FastAPI(
         title="VisionDesk",
         description="Sistema de visão computacional configurável (LER/CONTAR/DESCREVER/ANALISAR).",
         version="0.1.0",
         lifespan=lifespan,
+        # Auditoria out/2026 (C3): /docs, /redoc e /openapi.json só com
+        # VISIONDESK_EXPOSE_DOCS=true (desenvolvimento). Em produção, 404.
+        docs_url="/docs" if docs else None,
+        redoc_url="/redoc" if docs else None,
+        openapi_url="/openapi.json" if docs else None,
+        # Portão GLOBAL: toda rota /api/* e /ws/* exige sessão, salvo a lista
+        # PUBLIC de guard.py (login, health, config pública mínima).
+        dependencies=[Depends(guard.require_session)],
     )
     app.add_middleware(
         CORSMiddleware,
@@ -117,6 +136,28 @@ def create_app() -> FastAPI:
                 if request.headers.get("x-api-key") != settings.api_key:
                     return JSONResponse({"detail": {"code": "unauthorized", "message": "X-API-Key inválida"}}, status_code=401)
             return await call_next(request)
+
+    # Gestão de alterações: publica quem está agindo para os triggers do banco.
+    # Fica ANTES dos routers para valer em toda mutação, inclusive as que não
+    # passam pela trilha da aplicação.
+    @app.middleware("http")
+    async def _publica_ator(request, call_next):
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            try:
+                from .auth import auth as _auth
+                from .db.database import set_actor
+                s = await asyncio.to_thread(_auth.session, request.headers.get("x-auth-token"))
+                # set_actor só grava no ContextVar; quem aplica no Postgres é
+                # get_connection(), já na thread e na conexão que vai escrever.
+                set_actor((s or {}).get("operator_id"), request.url.path)
+            except Exception:  # noqa: BLE001
+                pass
+        return await call_next(request)
+
+    # Cookie de sessão → X-Auth-Token. Adicionado por ÚLTIMO para ser o
+    # middleware mais externo: tudo abaixo (inclusive _publica_ator) já vê o
+    # cabeçalho.
+    app.add_middleware(guard.SessionCookieBridge)
 
     # REST sob /api; WebSocket na raiz (/ws/stream).
     app.include_router(routes_health.router, prefix="/api")
@@ -144,6 +185,7 @@ def create_app() -> FastAPI:
     app.include_router(routes_auth.router, prefix="/api")
     app.include_router(routes_automation.router, prefix="/api")
     app.include_router(routes_config.router, prefix="/api")
+    app.include_router(routes_changes.router, prefix="/api")
     app.include_router(routes_security.router, prefix="/api")
     app.include_router(ws.router)
     app.include_router(ws_devices.router)
@@ -154,7 +196,7 @@ def create_app() -> FastAPI:
         return {
             "service": "VisionDesk",
             "version": "0.1.0",
-            "docs": "/docs",
+            "docs": "/docs" if docs else None,
             "ws": "/ws/stream",
         }
 

@@ -91,15 +91,44 @@ def _paddle() -> Any | None:
         return None
 
 
+# ── Backend 3: RapidOCR (PP-OCR em ONNX) ────────────────────────────
+@lru_cache(maxsize=1)
+def _rapid() -> Any | None:
+    """PP-OCR — os MESMOS modelos do PaddleOCR — rodando em onnxruntime.
+
+    POR QUE ESTE BACKEND EXISTE
+
+    No Linux desta instalação não havia OCR local nenhum: o Apple Vision é do
+    macOS e o PaddleOCR precisa do `paddlepaddle`, que **não publica wheel para
+    o Python 3.14** do servidor. Resultado prático: o modo LER caía sempre no
+    VLM e ficava refém de crédito na conta — quando o saldo acabou, LER parou.
+
+    O RapidOCR resolve sem trocar de modelo: são os pesos PP-OCR exportados
+    para ONNX, executados pelo onnxruntime, que tem wheel para 3.14 e roda bem
+    em CPU. Mesma qualidade de reconhecimento do PaddleOCR, sem a dependência
+    que não existe para esta versão do Python.
+    """
+    try:
+        import numpy  # noqa: F401
+        from PIL import Image  # noqa: F401
+        from rapidocr_onnxruntime import RapidOCR
+        return RapidOCR
+    except Exception:
+        return None
+
+
 class EdgeOCR:
     def __init__(self) -> None:
         self._engine: Any | None = None
+        self._rapid_engine: Any | None = None
 
     def backend(self) -> str | None:
         if _vision() is not None:
             return "apple_vision"
         if _paddle() is not None:
             return "paddleocr"
+        if _rapid() is not None:
+            return "rapidocr"
         return None
 
     def available(self) -> bool:
@@ -135,6 +164,32 @@ class EdgeOCR:
             ))
         return leituras
 
+    # ── RapidOCR (PP-OCR em ONNX) ───────────────────────────────
+    def _rapid_recognize(self, image_bytes: bytes, lang: str) -> list[Leitura]:
+        from PIL import Image
+        import numpy as np
+
+        if self._rapid_engine is None:
+            # A primeira chamada baixa os modelos (~15 MB) e os guarda em disco;
+            # as seguintes só carregam. Instanciar uma vez e reusar mantém a
+            # latência do LER na casa dos milissegundos.
+            self._rapid_engine = _rapid()()
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        w, h = img.size
+        resultado, _tempos = self._rapid_engine(np.asarray(img))
+
+        leituras: list[Leitura] = []
+        for item in resultado or []:
+            box, texto, conf = item[0], item[1], item[2]
+            xs = [p[0] for p in box]
+            ys = [p[1] for p in box]
+            x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+            leituras.append(Leitura(
+                texto=texto, confianca=float(conf),
+                bbox=[x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h],
+            ))
+        return leituras
+
     # ── despacho ────────────────────────────────────────────────
     def recognize(self, image_bytes: bytes, lang: str = "por") -> list[Leitura]:
         backend = self.backend()
@@ -142,9 +197,11 @@ class EdgeOCR:
             return _vision_recognize(image_bytes, lang)
         if backend == "paddleocr":
             return self._paddle_recognize(image_bytes, lang)
+        if backend == "rapidocr":
+            return self._rapid_recognize(image_bytes, lang)
         raise EdgeUnavailableError(
             "OCR edge indisponível (instale pyobjc-framework-Vision no macOS, "
-            "ou paddleocr, ou use o VLM)."
+            "paddleocr, ou rapidocr-onnxruntime; ou use o VLM)."
         )
 
 
